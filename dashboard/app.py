@@ -81,9 +81,9 @@ with st.sidebar:
 
     st.subheader("Cargar Cartera")
     uploaded_file = st.file_uploader(
-        "Sube tu CSV de cartera",
-        type=["csv"],
-        help="Debe incluir las columnas de la tabla maestra",
+        "Sube tu archivo de cartera",
+        type=["csv", "xlsx", "xls"],
+        help="Acepta Excel (.xlsx, .xls) o CSV. Debe incluir las columnas de la tabla maestra.",
     )
 
     st.divider()
@@ -107,7 +107,11 @@ pipeline = load_model()
 # Determinar fuente de datos
 if uploaded_file is not None and pipeline is not None:
     with st.spinner("Procesando cartera y calculando scores..."):
-        df_raw = pd.read_csv(uploaded_file)
+        name = uploaded_file.name.lower()
+        if name.endswith(".csv"):
+            df_raw = pd.read_csv(uploaded_file)
+        else:
+            df_raw = pd.read_excel(uploaded_file)
         df_scored = score_new_data(df_raw, pipeline)
     st.success(f"Cartera procesada: {len(df_scored):,} clientes")
 else:
