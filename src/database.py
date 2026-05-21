@@ -84,17 +84,21 @@ def init_db():
 
 
 def get_clientes_by_ids(ids: list) -> pd.DataFrame:
-    """Retorna clientes ya existentes en la BD dado una lista de IDs."""
+    """Retorna clientes existentes en la BD. Procesa en lotes de 900 para respetar el límite de SQLite."""
     if not ids:
         return pd.DataFrame()
     conn = get_connection()
-    placeholders = ",".join("?" * len(ids))
-    df = pd.read_sql_query(
-        f"SELECT * FROM clientes WHERE cliente_id IN ({placeholders})",
-        conn, params=ids,
-    )
+    chunks = [ids[i:i+900] for i in range(0, len(ids), 900)]
+    resultados = []
+    for chunk in chunks:
+        ph = ",".join("?" * len(chunk))
+        df_chunk = pd.read_sql_query(
+            f"SELECT * FROM clientes WHERE cliente_id IN ({ph})",
+            conn, params=chunk,
+        )
+        resultados.append(df_chunk)
     conn.close()
-    return df
+    return pd.concat(resultados, ignore_index=True) if resultados else pd.DataFrame()
 
 
 def upsert_clientes_batch(df: pd.DataFrame, carga_id: int) -> dict:
@@ -107,12 +111,16 @@ def upsert_clientes_batch(df: pd.DataFrame, carga_id: int) -> dict:
     today = datetime.today().strftime("%Y-%m-%d")
 
     ids = df["cliente_id"].tolist()
-    placeholders = ",".join("?" * len(ids))
-    cursor.execute(
-        f"SELECT cliente_id, veces_procesado, fecha_primera_carga FROM clientes WHERE cliente_id IN ({placeholders})",
-        ids,
-    )
-    existing = {row["cliente_id"]: row for row in cursor.fetchall()}
+    existing = {}
+    for i in range(0, len(ids), 900):
+        chunk = ids[i:i+900]
+        ph = ",".join("?" * len(chunk))
+        cursor.execute(
+            f"SELECT cliente_id, veces_procesado, fecha_primera_carga FROM clientes WHERE cliente_id IN ({ph})",
+            chunk,
+        )
+        for row in cursor.fetchall():
+            existing[row["cliente_id"]] = row
 
     nuevos = 0
     actualizados = 0
