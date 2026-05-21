@@ -1,11 +1,10 @@
 """
-Dashboard de Scoring de Cobranza — Streamlit
-=============================================
-Ejecutar: streamlit run dashboard/app.py
+Dashboard de Cobranza — Sistema Integral con Autenticación y Base de Datos
+===========================================================================
+streamlit run dashboard/app.py
 """
 
-import sys
-import os
+import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import streamlit as st
@@ -13,13 +12,19 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+import joblib, io
 from pathlib import Path
-import joblib
-import io
+from datetime import datetime
 
-# ── Configuración de página ───────────────────────────────────────────────────
+from database import (
+    init_db, get_clientes_by_ids, upsert_clientes_batch,
+    log_carga, get_cargas_historico, get_metricas_globales, get_all_clientes_df,
+)
+from auth import authenticate, create_user, get_all_users, toggle_user_status, update_password
+
+# ── Configuración ─────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Score de Cobranza — Call Center",
+    page_title="Score de Cobranza",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -27,335 +32,697 @@ st.set_page_config(
 
 MODELS_DIR = Path("models")
 DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
 
-SEGMENT_COLORS = {
-    "ALTO": "#2ecc71",
-    "MEDIO": "#f39c12",
-    "BAJO": "#e74c3c",
+COLORES = {"ALTO": "#27ae60", "MEDIO": "#f39c12", "BAJO": "#e74c3c"}
+
+# ── Estrategias Globales (Metodologías de los mejores call centers del mundo) ─
+ESTRATEGIAS = {
+    "ALTO": {
+        "canal":      "WhatsApp Business / SMS / Email / IVR Autopago",
+        "accion":     "Recordatorio digital automático con link de pago seguro",
+        "oferta":     "Facilidad: 2 cuotas sin interés adicional / Autopago inmediato",
+        "frecuencia": "Máx. 2 contactos digitales por semana (cumple normativa SBS)",
+        "escalacion": "Sin pago en 7 días → Escalar a MEDIO",
+        "script":     "Hola [Nombre], tienes un saldo pendiente de S/[monto]. Puedes pagarlo hoy aquí: [link]. Tu historial crediticio te lo agradecerá.",
+        "kpis":       "Conversión digital ≥20% | Costo por contacto S/ 0.10-0.30 | ROI ≥400%",
+        "referencia": "Metodología Hoist Finance / Interbank Perú — Digital First Collection",
+    },
+    "MEDIO": {
+        "canal":      "Marcador Predictivo + Agente Humano (AMD activado)",
+        "accion":     "Negociación activa con script ACED + registro de Promesa de Pago (PTP)",
+        "oferta":     "Plan 3-6 cuotas / Condonación intereses moratorios / Refinanciamiento",
+        "frecuencia": "Máx. 3 intentos/día | Best time: 9-11am y 6-8pm L-V / 9-12pm Sáb",
+        "escalacion": "2 PTPs rotas → Escalar a BAJO | PTP honrada → Mantener MEDIO",
+        "script":     "ACED: A-cknowledge (reconocer deuda) → C-reate urgency → E-mpathize → D-eal (comprometer fecha/monto). Oferta: 'Puedo condonarle los intereses si paga el capital hoy.'",
+        "kpis":       "RPC ≥45% | PTP Rate ≥30% | Kept PTP ≥65% | Costo S/ 2-3.50",
+        "referencia": "Metodología FICO TRIAD / COFACE / Encore Capital — Human-Assisted Negotiation",
+    },
+    "BAJO": {
+        "canal":      "Especialista Senior / Notaría / Agencia Externa / Pre-Legal",
+        "accion":     "Skip Tracing → Carta Notarial → Oferta Settlement → Derivación",
+        "oferta":     "Score 20-33: Skip tracing | Score 10-19: Quita 20-40% | Score 1-9: Pre-legal / Venta",
+        "frecuencia": "Gestión semanal especializada. Decisión por DPD y saldo.",
+        "escalacion": "DPD>90 sin contacto: Agencia externa | DPD>180: Evaluar venta 5-15 ctvs/sol",
+        "script":     "Carta notarial formal: 'Notificamos que de no regularizar su deuda de S/[monto] en 15 días hábiles, iniciaremos proceso judicial y registro en centrales de riesgo SBS/Equifax.'",
+        "kpis":       "Skip tracing ≥25% | Settlement aceptado ≥15% | Recovery ≥8% | Costo S/ 10-25",
+        "referencia": "Metodología Intrum / Portfolio Recovery Associates / COFACE — Intensive & Legal",
+    },
 }
 
-# ── Estilos CSS personalizados ────────────────────────────────────────────────
-st.markdown("""
-<style>
-    .metric-card {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-        border-radius: 12px; padding: 20px; text-align: center;
-        border-left: 4px solid;
-    }
-    .metric-value { font-size: 2.2rem; font-weight: 700; color: white; }
-    .metric-label { font-size: 0.85rem; color: #aaa; margin-top: 4px; }
-    .stAlert { border-radius: 8px; }
-    h1, h2, h3 { color: #ecf0f1; }
-</style>
-""", unsafe_allow_html=True)
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
 
-
-# ── Carga del modelo ──────────────────────────────────────────────────────────
 @st.cache_resource
 def load_model():
-    model_path = MODELS_DIR / "pipeline_random_forest.pkl"
-    if model_path.exists():
-        return joblib.load(model_path)
-    return None
+    path = MODELS_DIR / "pipeline_random_forest.pkl"
+    return joblib.load(path) if path.exists() else None
 
 
-@st.cache_data
-def load_demo_data():
-    demo_path = DATA_DIR / "cartera_scored.csv"
-    if demo_path.exists():
-        return pd.read_csv(demo_path)
-    return None
-
-
-def score_new_data(df_raw: pd.DataFrame, pipeline) -> pd.DataFrame:
+def score_dataframe(df_raw: pd.DataFrame, pipeline) -> pd.DataFrame:
+    """Aplica el modelo y enriquece con estrategia detallada."""
     from model import score_portfolio
-    return score_portfolio(df_raw, pipeline)
+    df_scored = score_portfolio(df_raw, pipeline)
+
+    df_scored["estrategia_canal"]  = df_scored["segmento"].map(lambda s: ESTRATEGIAS.get(s, {}).get("canal", ""))
+    df_scored["estrategia_accion"] = df_scored["segmento"].map(lambda s: ESTRATEGIAS.get(s, {}).get("accion", ""))
+    df_scored["estrategia_oferta"] = df_scored["segmento"].map(lambda s: ESTRATEGIAS.get(s, {}).get("oferta", ""))
+    df_scored["frecuencia_contacto"] = df_scored["segmento"].map(lambda s: ESTRATEGIAS.get(s, {}).get("frecuencia", ""))
+    return df_scored
 
 
-# ── SIDEBAR ───────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.image("https://img.icons8.com/fluency/96/phone-call.png", width=60)
-    st.title("Score de Cobranza")
-    st.caption("Sistema Predictivo — Call Center")
-    st.divider()
-
-    st.subheader("Cargar Cartera")
-    uploaded_file = st.file_uploader(
-        "Sube tu archivo de cartera",
-        type=["csv", "xlsx", "xls"],
-        help="Acepta Excel (.xlsx, .xls) o CSV. Debe incluir las columnas de la tabla maestra.",
-    )
-
-    st.divider()
-    st.subheader("Filtros")
-    segmentos_sel = st.multiselect(
-        "Segmentos",
-        options=["ALTO", "MEDIO", "BAJO"],
-        default=["ALTO", "MEDIO", "BAJO"],
-    )
-    score_range = st.slider("Rango de Score", 1, 100, (1, 100))
-    st.divider()
-    st.caption("v1.0 — MVP Call Center Cuzco")
-
-
-# ── CUERPO PRINCIPAL ──────────────────────────────────────────────────────────
-st.title("📊 Dashboard de Score Predictivo de Cobranza")
-st.caption(f"Actualizado: {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')}")
-
-pipeline = load_model()
-
-# Determinar fuente de datos
-if uploaded_file is not None and pipeline is not None:
-    with st.spinner("Procesando cartera y calculando scores..."):
-        name = uploaded_file.name.lower()
-        if name.endswith(".csv"):
-            df_raw = pd.read_csv(uploaded_file)
+def process_upload(df_raw: pd.DataFrame, pipeline, usuario: str, filename: str):
+    """
+    Flujo principal de carga:
+    1. Identifica clientes ya en DB vs nuevos
+    2. Aplica modelo a todos con datos frescos
+    3. Guarda en DB
+    4. Retorna DataFrame completo + estadísticas
+    """
+    # Asegurar columna cliente_id
+    if "cliente_id" not in df_raw.columns:
+        posibles = [c for c in df_raw.columns if "id" in c.lower() or "cliente" in c.lower()]
+        if posibles:
+            df_raw = df_raw.rename(columns={posibles[0]: "cliente_id"})
         else:
-            df_raw = pd.read_excel(uploaded_file)
-        df_scored = score_new_data(df_raw, pipeline)
-    st.success(f"Cartera procesada: {len(df_scored):,} clientes")
-else:
-    df_scored = load_demo_data()
-    if df_scored is None:
-        st.warning("No se encontró modelo ni datos. Ejecuta `python src/main.py` primero.")
-        st.stop()
+            df_raw.insert(0, "cliente_id", [f"CLI-{i:06d}" for i in range(1, len(df_raw) + 1)])
+
+    ids = df_raw["cliente_id"].astype(str).tolist()
+
+    # Verificar en BD
+    df_existentes = get_clientes_by_ids(ids)
+    ids_conocidos = set(df_existentes["cliente_id"].tolist()) if len(df_existentes) > 0 else set()
+
+    n_conocidos = sum(1 for i in ids if i in ids_conocidos)
+    n_nuevos = len(ids) - n_conocidos
+
+    # Score a TODOS con datos frescos (más preciso que usar score guardado)
+    df_scored = score_dataframe(df_raw, pipeline)
+    df_scored["es_nuevo"] = ~df_scored["cliente_id"].isin(ids_conocidos)
+    df_scored["estado_carga"] = df_scored["es_nuevo"].map({True: "🆕 Nuevo", False: "✅ Actualizado"})
+
+    # Persistir en BD
+    carga_id = log_carga(usuario, filename, len(df_scored), n_nuevos, n_conocidos)
+    upsert_clientes_batch(df_scored, carga_id)
+
+    stats = {"total": len(df_scored), "nuevos": n_nuevos, "conocidos": n_conocidos, "carga_id": carga_id}
+    return df_scored, stats
+
+
+def export_excel(df: pd.DataFrame) -> bytes:
+    """Genera Excel multi-hoja para el Dialer."""
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        # Hoja 1: Cartera completa
+        df.to_excel(writer, index=False, sheet_name="Cartera Completa")
+
+        # Hoja 2: Por segmento
+        for seg in ["ALTO", "MEDIO", "BAJO"]:
+            sub = df[df["segmento"] == seg]
+            if len(sub) > 0:
+                sub.to_excel(writer, index=False, sheet_name=f"Segmento {seg}")
+
+        # Hoja 3: Resumen
+        resumen = (
+            df.groupby("segmento")
+            .agg(clientes=("cliente_id", "count"),
+                 score_promedio=("score_operativo", "mean"),
+                 prob_pago_promedio=("prob_pago", "mean"),
+                 saldo_total=("saldo_total", "sum"))
+            .round(2)
+        )
+        resumen["pct_cartera"] = (resumen["clientes"] / len(df) * 100).round(1)
+        resumen.to_excel(writer, sheet_name="Resumen Ejecutivo")
+
+        # Hoja 4: Guía de estrategias
+        guia = pd.DataFrame([
+            {"Segmento": seg,
+             "Canal": ESTRATEGIAS[seg]["canal"],
+             "Acción": ESTRATEGIAS[seg]["accion"],
+             "Oferta": ESTRATEGIAS[seg]["oferta"],
+             "Frecuencia": ESTRATEGIAS[seg]["frecuencia"],
+             "Escalación": ESTRATEGIAS[seg]["escalacion"],
+             "KPIs Objetivo": ESTRATEGIAS[seg]["kpis"]}
+            for seg in ["ALTO", "MEDIO", "BAJO"]
+        ])
+        guia.to_excel(writer, index=False, sheet_name="Guía Estrategias")
+
+    return buf.getvalue()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LOGIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def show_login():
+    init_db()
+    col1, col2, col3 = st.columns([1, 1.2, 1])
+    with col2:
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        st.markdown("## 📊 Sistema de Cobranza")
+        st.markdown("**Call Center Cuzco** — Score Predictivo")
+        st.divider()
+
+        with st.form("login_form"):
+            username = st.text_input("Usuario", placeholder="Ingresa tu usuario")
+            password = st.text_input("Contraseña", type="password", placeholder="••••••••")
+            submit = st.form_submit_button("Ingresar", use_container_width=True, type="primary")
+
+        if submit:
+            if not username or not password:
+                st.error("Completa usuario y contraseña.")
+            else:
+                user = authenticate(username, password)
+                if user:
+                    st.session_state["user"] = user
+                    st.session_state["page"] = "inicio"
+                    st.rerun()
+                else:
+                    st.error("Usuario o contraseña incorrectos.")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.caption("¿Problemas de acceso? Contacta al Administrador.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SIDEBAR
+# ─────────────────────────────────────────────────────────────────────────────
+
+def show_sidebar():
+    user = st.session_state["user"]
+    rol = user["rol"]
+
+    with st.sidebar:
+        st.markdown(f"### 👤 {user['nombre']}")
+        badge = "🔴 Admin" if rol == "admin" else "🟡 Colaborador"
+        st.caption(badge)
+        st.divider()
+
+        st.subheader("Navegación")
+        pages = {
+            "inicio":      "🏠 Inicio",
+            "cargar":      "📤 Cargar Cartera",
+            "analisis":    "📊 Análisis",
+            "historial":   "📋 Historial de Cargas",
+            "estrategias": "🎯 Estrategias",
+        }
+        if rol == "admin":
+            pages["admin"] = "⚙️ Panel Admin"
+
+        current = st.session_state.get("page", "inicio")
+        for key, label in pages.items():
+            if st.button(label, use_container_width=True,
+                         type="primary" if current == key else "secondary"):
+                st.session_state["page"] = key
+                st.rerun()
+
+        st.divider()
+        if st.button("🚪 Cerrar Sesión", use_container_width=True):
+            st.session_state.clear()
+            st.rerun()
+
+        st.caption("v2.0 — Call Center Cuzco")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PÁGINA: INICIO
+# ─────────────────────────────────────────────────────────────────────────────
+
+def page_inicio():
+    st.title("🏠 Inicio — Resumen de la Base de Datos")
+    st.caption(f"Actualizado: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+
+    metrics = get_metricas_globales()
+    total = metrics["total_clientes"]
+
+    if total == 0:
+        st.info("La base de datos está vacía. Ve a **Cargar Cartera** para procesar tu primera cartera.")
+        return
+
+    seg = metrics["por_segmento"]
+    alto  = seg.get("ALTO",  {}).get("count", 0)
+    medio = seg.get("MEDIO", {}).get("count", 0)
+    bajo  = seg.get("BAJO",  {}).get("count", 0)
+
+    # KPIs
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Total en BD", f"{total:,}")
+    c2.metric("Score Promedio", f"{metrics['avg_score']}")
+    c3.metric("🟢 ALTO", f"{alto:,}", f"{alto/total*100:.1f}%" if total else "")
+    c4.metric("🟡 MEDIO", f"{medio:,}", f"{medio/total*100:.1f}%" if total else "")
+    c5.metric("🔴 BAJO", f"{bajo:,}", f"{bajo/total*100:.1f}%" if total else "")
+    c6.metric("Total Cargas", f"{metrics['total_cargas']}")
+
+    st.divider()
+
+    df_db = get_all_clientes_df(limit=10000)
+    col_l, col_r = st.columns(2)
+
+    with col_l:
+        st.subheader("Composición de la Cartera en BD")
+        data_pie = {"Segmento": list(seg.keys()), "Clientes": [v["count"] for v in seg.values()]}
+        fig = px.pie(data_pie, values="Clientes", names="Segmento",
+                     color="Segmento", color_discrete_map=COLORES,
+                     hole=0.45, template="plotly_dark")
+        fig.update_layout(height=350)
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col_r:
+        st.subheader("Distribución de Score en BD")
+        if len(df_db) > 0:
+            fig2 = px.histogram(df_db, x="score_operativo", nbins=40,
+                                color="segmento", color_discrete_map=COLORES,
+                                template="plotly_dark",
+                                labels={"score_operativo": "Score (1-100)"})
+            fig2.update_layout(height=350, bargap=0.05)
+            st.plotly_chart(fig2, use_container_width=True)
+
+    st.subheader("Saldo de Cartera por Segmento")
+    saldo_data = [{"Segmento": k, "Saldo Total (S/)": v["saldo"]} for k, v in seg.items()]
+    if saldo_data:
+        fig3 = px.bar(pd.DataFrame(saldo_data), x="Segmento", y="Saldo Total (S/)",
+                      color="Segmento", color_discrete_map=COLORES,
+                      text_auto=".3s", template="plotly_dark")
+        fig3.update_layout(showlegend=False, height=300)
+        st.plotly_chart(fig3, use_container_width=True)
+
+    st.subheader("Últimas Cargas")
+    df_cargas = get_cargas_historico()
+    if len(df_cargas) > 0:
+        st.dataframe(df_cargas.head(8), hide_index=True, use_container_width=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PÁGINA: CARGAR CARTERA
+# ─────────────────────────────────────────────────────────────────────────────
+
+def page_cargar():
+    st.title("📤 Cargar Cartera")
+    st.caption("Sube tu Excel del día. El sistema identifica automáticamente clientes ya registrados.")
+
+    pipeline = load_model()
     if pipeline is None:
-        st.info("Mostrando datos de demo. Para procesar nueva cartera, entrena el modelo primero.")
+        st.error("Modelo no encontrado. Ejecuta primero: `python src/main.py`")
+        return
 
-# Aplicar filtros
-df_filtered = df_scored[
-    (df_scored["segmento"].isin(segmentos_sel)) &
-    (df_scored["score_operativo"] >= score_range[0]) &
-    (df_scored["score_operativo"] <= score_range[1])
-].copy()
+    uploaded = st.file_uploader(
+        "Selecciona tu archivo de cartera",
+        type=["xlsx", "xls", "csv"],
+        help="Acepta Excel (.xlsx, .xls) y CSV. Columna requerida: cliente_id (o similar).",
+    )
 
-# ── KPIs PRINCIPALES ──────────────────────────────────────────────────────────
-st.subheader("Resumen Ejecutivo de la Cartera")
-col1, col2, col3, col4, col5 = st.columns(5)
+    if uploaded is None:
+        st.info("Sube un archivo para comenzar. El proceso toma pocos segundos incluso con 30,000+ cuentas.")
+        with st.expander("📋 Columnas esperadas en el archivo"):
+            st.markdown("""
+| Columna | Tipo | Descripción |
+|---|---|---|
+| `cliente_id` | Texto | Identificador único del cliente |
+| `dpd` | Número | Días en mora |
+| `saldo_total` | Número | Saldo vencido total |
+| `bucket_mora` | Texto | B1, B2, B3, B4 |
+| `rpc_rate` | Decimal | Tasa de contacto efectivo (0.0 a 1.0) |
+| `promesas_cumplidas` | Número | Promesas de pago honradas |
+| `promesas_rotas` | Número | Promesas incumplidas |
+| `dias_ultimo_contacto` | Número | Días desde último contacto |
+| `ultimo_estado_marcado` | Texto | RPC_PROMESA, NO_CONTESTA, etc. |
+| `estado_laboral` | Texto | Dependiente, Independiente, etc. |
+| `ingreso_mensual` | Número | Ingreso declarado |
+| `ratio_deuda_ingreso` | Decimal | deuda / (ingreso × 12) |
 
-total = len(df_filtered)
-alto = (df_filtered["segmento"] == "ALTO").sum()
-medio = (df_filtered["segmento"] == "MEDIO").sum()
-bajo = (df_filtered["segmento"] == "BAJO").sum()
-score_prom = df_filtered["score_operativo"].mean()
+*Columnas faltantes se imputan con medianas del modelo de entrenamiento.*
+            """)
+        return
 
-with col1:
-    st.metric("Total Clientes", f"{total:,}", help="Cartera filtrada actual")
-with col2:
-    st.metric("Score Promedio", f"{score_prom:.1f}", help="Media del score operativo")
-with col3:
-    st.metric("🟢 Segmento ALTO", f"{alto:,}", f"{alto/total*100:.1f}%")
-with col4:
-    st.metric("🟡 Segmento MEDIO", f"{medio:,}", f"{medio/total*100:.1f}%")
-with col5:
-    st.metric("🔴 Segmento BAJO", f"{bajo:,}", f"{bajo/total*100:.1f}%")
+    # Leer archivo
+    try:
+        name = uploaded.name.lower()
+        if name.endswith(".csv"):
+            df_raw = pd.read_csv(uploaded, low_memory=False)
+        else:
+            df_raw = pd.read_excel(uploaded)
+    except Exception as e:
+        st.error(f"Error al leer el archivo: {e}")
+        return
 
-st.divider()
+    st.success(f"Archivo cargado: **{uploaded.name}** — {len(df_raw):,} registros · {df_raw.shape[1]} columnas")
 
-# ── GRÁFICOS ──────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📈 Distribución de Score",
-    "🎯 Segmentación Operativa",
-    "🔍 Análisis de Variables",
-    "📋 Lista para Dialer",
-])
+    with st.expander("Vista previa (primeros 5 registros)"):
+        st.dataframe(df_raw.head(5), use_container_width=True)
 
-with tab1:
-    col_l, col_r = st.columns(2)
+    if st.button("🚀 Procesar Cartera y Calcular Scores", type="primary", use_container_width=True):
+        usuario = st.session_state["user"]["username"]
 
-    with col_l:
-        st.subheader("Histograma de Score Operativo")
-        fig_hist = px.histogram(
-            df_filtered,
-            x="score_operativo",
-            nbins=50,
-            color="segmento",
-            color_discrete_map=SEGMENT_COLORS,
-            labels={"score_operativo": "Score (1-100)", "count": "Clientes"},
-            template="plotly_dark",
-        )
-        fig_hist.update_layout(bargap=0.1, height=350)
-        st.plotly_chart(fig_hist, use_container_width=True)
+        with st.spinner(f"Procesando {len(df_raw):,} cuentas..."):
+            progress = st.progress(0, text="Verificando en base de datos...")
+            try:
+                progress.progress(20, text="Identificando clientes conocidos vs nuevos...")
+                df_result, stats = process_upload(df_raw, pipeline, usuario, uploaded.name)
+                progress.progress(80, text="Guardando en base de datos...")
+                progress.progress(100, text="¡Listo!")
+            except Exception as e:
+                st.error(f"Error durante el procesamiento: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+                return
 
-    with col_r:
-        st.subheader("Distribución de Probabilidad de Pago")
-        fig_prob = px.box(
-            df_filtered,
-            x="segmento",
-            y="prob_pago",
-            color="segmento",
-            color_discrete_map=SEGMENT_COLORS,
-            labels={"prob_pago": "Probabilidad de Pago", "segmento": "Segmento"},
-            template="plotly_dark",
-        )
-        fig_prob.update_layout(height=350, showlegend=False)
-        st.plotly_chart(fig_prob, use_container_width=True)
+        # Estadísticas del proceso
+        st.divider()
+        st.subheader("Resultado del Procesamiento")
+        rc1, rc2, rc3 = st.columns(3)
+        rc1.metric("Total Procesado", f"{stats['total']:,}")
+        rc2.metric("✅ Ya en BD (actualizados)", f"{stats['conocidos']:,}",
+                   f"{stats['conocidos']/stats['total']*100:.1f}%" if stats['total'] else "")
+        rc3.metric("🆕 Clientes Nuevos", f"{stats['nuevos']:,}",
+                   f"{stats['nuevos']/stats['total']*100:.1f}%" if stats['total'] else "")
 
+        # Distribución por segmento
+        seg_counts = df_result["segmento"].value_counts()
+        c1, c2, c3 = st.columns(3)
+        for col, seg in zip([c1, c2, c3], ["ALTO", "MEDIO", "BAJO"]):
+            n = seg_counts.get(seg, 0)
+            col.metric(f"Segmento {seg}", f"{n:,}", f"{n/len(df_result)*100:.1f}%")
 
-with tab2:
-    col_l, col_r = st.columns(2)
+        st.divider()
 
-    with col_l:
-        st.subheader("Composición de la Cartera")
-        seg_counts = df_filtered["segmento"].value_counts().reset_index()
-        seg_counts.columns = ["Segmento", "Clientes"]
-        fig_pie = px.pie(
-            seg_counts,
-            values="Clientes",
-            names="Segmento",
-            color="Segmento",
-            color_discrete_map=SEGMENT_COLORS,
-            hole=0.45,
-            template="plotly_dark",
-        )
-        fig_pie.update_layout(height=380)
-        st.plotly_chart(fig_pie, use_container_width=True)
-
-    with col_r:
-        st.subheader("Estrategia Operativa por Segmento")
-
-        strategy_data = pd.DataFrame({
-            "Segmento": ["🟢 ALTO", "🟡 MEDIO", "🔴 BAJO"],
-            "Score": ["67 – 100", "34 – 66", "1 – 33"],
-            "Estrategia": [
-                "SMS / WhatsApp / Bot",
-                "Agente + Marcador Predictivo",
-                "Especialista / Pre-Legal",
-            ],
-            "Objetivo": [
-                "Recuperación masiva low-cost",
-                "Negociación activa y planes de pago",
-                "Acuerdo final o derivación a agencia",
-            ],
-            "Clientes": [alto, medio, bajo],
-        })
+        # Tabla de resultados
+        st.subheader("Cartera Segmentada")
+        cols_mostrar = [c for c in [
+            "cliente_id", "score_operativo", "segmento", "prob_pago",
+            "estrategia_canal", "estrategia_oferta", "dpd", "saldo_total",
+            "bucket_mora", "rpc_rate", "estado_carga",
+        ] if c in df_result.columns]
 
         st.dataframe(
-            strategy_data,
-            hide_index=True,
+            df_result[cols_mostrar].sort_values("score_operativo", ascending=False).head(500),
             use_container_width=True,
+            hide_index=True,
             column_config={
-                "Clientes": st.column_config.ProgressColumn(
-                    "Clientes", min_value=0, max_value=total
-                )
+                "score_operativo": st.column_config.ProgressColumn("Score", min_value=1, max_value=100),
+                "prob_pago": st.column_config.NumberColumn("Prob. Pago", format="%.1%"),
             },
         )
+        st.caption(f"Mostrando primeros 500 de {len(df_result):,} registros ordenados por score.")
 
-        if "saldo_total" in df_filtered.columns:
+        # Descarga
+        st.divider()
+        excel_bytes = export_excel(df_result)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+
+        dl1, dl2 = st.columns(2)
+        with dl1:
+            st.download_button(
+                "⬇️ Descargar Excel Completo (4 hojas)",
+                data=excel_bytes,
+                file_name=f"cartera_scored_{timestamp}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                use_container_width=True,
+            )
+        with dl2:
+            csv_buf = io.StringIO()
+            df_result.to_csv(csv_buf, index=False)
+            st.download_button(
+                "⬇️ Descargar CSV para Dialer",
+                data=csv_buf.getvalue(),
+                file_name=f"dialer_{timestamp}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PÁGINA: ANÁLISIS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def page_analisis():
+    st.title("📊 Análisis de Cartera")
+
+    df = get_all_clientes_df(limit=30000)
+    if len(df) == 0:
+        st.info("Carga tu primera cartera para ver análisis.")
+        return
+
+    # Filtros
+    with st.expander("Filtros", expanded=False):
+        f1, f2 = st.columns(2)
+        segs = f1.multiselect("Segmentos", ["ALTO", "MEDIO", "BAJO"], default=["ALTO", "MEDIO", "BAJO"])
+        score_range = f2.slider("Rango de Score", 1, 100, (1, 100))
+
+    df_f = df[df["segmento"].isin(segs) & df["score_operativo"].between(*score_range)]
+    st.caption(f"{len(df_f):,} clientes en la selección")
+
+    tab1, tab2, tab3 = st.tabs(["Score y Mora", "Contactabilidad", "Saldo y Riesgo"])
+
+    with tab1:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("Score vs DPD")
+            fig = px.scatter(df_f.sample(min(2000, len(df_f))), x="dpd", y="score_operativo",
+                             color="segmento", color_discrete_map=COLORES, opacity=0.6,
+                             template="plotly_dark",
+                             labels={"dpd": "Días en mora (DPD)", "score_operativo": "Score"})
+            st.plotly_chart(fig, use_container_width=True)
+        with c2:
+            st.subheader("Distribución por Bucket de Mora")
+            if "bucket_mora" in df_f.columns:
+                fig2 = px.histogram(df_f, x="bucket_mora", color="segmento",
+                                    color_discrete_map=COLORES, barmode="group",
+                                    template="plotly_dark",
+                                    category_orders={"bucket_mora": ["B1", "B2", "B3", "B4"]})
+                st.plotly_chart(fig2, use_container_width=True)
+
+    with tab2:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("RPC Rate por Segmento")
+            if "rpc_rate" in df_f.columns:
+                fig3 = px.box(df_f, x="segmento", y="rpc_rate", color="segmento",
+                              color_discrete_map=COLORES, template="plotly_dark",
+                              labels={"rpc_rate": "Tasa de Contacto Efectivo"})
+                fig3.update_layout(showlegend=False)
+                st.plotly_chart(fig3, use_container_width=True)
+        with c2:
+            st.subheader("Último Estado de Marcado")
+            if "ultimo_estado_marcado" in df_f.columns:
+                estado_cnt = df_f["ultimo_estado_marcado"].value_counts().head(8).reset_index()
+                estado_cnt.columns = ["Estado", "Clientes"]
+                fig4 = px.bar(estado_cnt, x="Clientes", y="Estado", orientation="h",
+                              template="plotly_dark", color="Clientes",
+                              color_continuous_scale="Blues")
+                fig4.update_layout(showlegend=False, yaxis={"categoryorder": "total ascending"})
+                st.plotly_chart(fig4, use_container_width=True)
+
+    with tab3:
+        c1, c2 = st.columns(2)
+        with c1:
             st.subheader("Saldo Total por Segmento")
-            saldo_seg = df_filtered.groupby("segmento")["saldo_total"].sum().reset_index()
-            fig_bar = px.bar(
-                saldo_seg,
-                x="segmento",
-                y="saldo_total",
-                color="segmento",
-                color_discrete_map=SEGMENT_COLORS,
-                text_auto=".2s",
-                template="plotly_dark",
-                labels={"saldo_total": "Saldo Total (S/)", "segmento": "Segmento"},
-            )
-            fig_bar.update_layout(height=280, showlegend=False)
-            st.plotly_chart(fig_bar, use_container_width=True)
+            if "saldo_total" in df_f.columns:
+                saldo = df_f.groupby("segmento")["saldo_total"].sum().reset_index()
+                fig5 = px.bar(saldo, x="segmento", y="saldo_total", color="segmento",
+                              color_discrete_map=COLORES, text_auto=".3s",
+                              template="plotly_dark",
+                              labels={"saldo_total": "Saldo Total (S/)"})
+                fig5.update_layout(showlegend=False)
+                st.plotly_chart(fig5, use_container_width=True)
+        with c2:
+            st.subheader("Probabilidad de Pago Promedio")
+            fig6 = px.box(df_f, x="segmento", y="prob_pago", color="segmento",
+                          color_discrete_map=COLORES, template="plotly_dark",
+                          labels={"prob_pago": "Probabilidad de Pago"})
+            fig6.update_layout(showlegend=False)
+            st.plotly_chart(fig6, use_container_width=True)
 
 
-with tab3:
-    col_l, col_r = st.columns(2)
+# ─────────────────────────────────────────────────────────────────────────────
+# PÁGINA: HISTORIAL
+# ─────────────────────────────────────────────────────────────────────────────
 
-    if "dpd" in df_filtered.columns:
-        with col_l:
-            st.subheader("Score vs DPD (días en mora)")
-            fig_scatter = px.scatter(
-                df_filtered.sample(min(1000, len(df_filtered))),
-                x="dpd",
-                y="score_operativo",
-                color="segmento",
-                color_discrete_map=SEGMENT_COLORS,
-                opacity=0.6,
-                template="plotly_dark",
-                labels={"dpd": "DPD", "score_operativo": "Score Operativo"},
-            )
-            fig_scatter.update_layout(height=350)
-            st.plotly_chart(fig_scatter, use_container_width=True)
+def page_historial():
+    st.title("📋 Historial de Cargas")
 
-    if "rpc_rate" in df_filtered.columns:
-        with col_r:
-            st.subheader("Score vs RPC Rate")
-            fig_scatter2 = px.scatter(
-                df_filtered.sample(min(1000, len(df_filtered))),
-                x="rpc_rate",
-                y="score_operativo",
-                color="segmento",
-                color_discrete_map=SEGMENT_COLORS,
-                opacity=0.6,
-                template="plotly_dark",
-                labels={"rpc_rate": "Tasa de Contacto Efectivo", "score_operativo": "Score Operativo"},
-            )
-            fig_scatter2.update_layout(height=350)
-            st.plotly_chart(fig_scatter2, use_container_width=True)
+    df = get_cargas_historico()
+    if len(df) == 0:
+        st.info("Sin cargas registradas aún.")
+        return
 
+    total_procesado = df["total_registros"].sum()
+    total_nuevos = df["registros_nuevos"].sum()
 
-with tab4:
-    st.subheader("Lista Segmentada para Exportar al Dialer")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Cargas", f"{len(df):,}")
+    c2.metric("Total Registros Procesados", f"{total_procesado:,}")
+    c3.metric("Clientes Nuevos Registrados", f"{total_nuevos:,}")
 
-    # Columnas clave para el marcador predictivo
-    dialer_cols = [
-        c for c in [
-            "cliente_id", "score_operativo", "segmento", "estrategia",
-            "prioridad_dialer", "prob_pago", "dpd", "saldo_total",
-            "bucket_mora", "rpc_rate", "ultimo_estado_marcado",
-        ]
-        if c in df_filtered.columns
-    ]
-
-    df_dialer = df_filtered[dialer_cols].sort_values("score_operativo", ascending=False)
-
-    # Resaltado por segmento
-    def highlight_segment(row):
-        colors = {"ALTO": "background-color: #1a3a1a", "MEDIO": "#3a2e00", "BAJO": "#3a0a0a"}
-        return [colors.get(row.get("segmento", ""), "")] * len(row)
-
+    st.divider()
     st.dataframe(
-        df_dialer.head(500),
-        use_container_width=True,
+        df,
         hide_index=True,
+        use_container_width=True,
         column_config={
-            "score_operativo": st.column_config.ProgressColumn(
-                "Score", min_value=1, max_value=100
-            ),
-            "prob_pago": st.column_config.NumberColumn("Prob. Pago", format="%.2%"),
+            "total_registros":        st.column_config.NumberColumn("Total"),
+            "registros_nuevos":       st.column_config.NumberColumn("Nuevos"),
+            "registros_actualizados": st.column_config.NumberColumn("Actualizados"),
         },
     )
 
-    st.caption(f"Mostrando primeros 500 de {len(df_dialer):,} registros ordenados por score.")
 
-    # ── Exportación ────────────────────────────────────────────────────────────
-    col_exp1, col_exp2 = st.columns(2)
+# ─────────────────────────────────────────────────────────────────────────────
+# PÁGINA: ESTRATEGIAS
+# ─────────────────────────────────────────────────────────────────────────────
 
-    with col_exp1:
-        csv_buffer = io.StringIO()
-        df_dialer.to_csv(csv_buffer, index=False)
-        st.download_button(
-            label="⬇️ Descargar CSV para Dialer",
-            data=csv_buffer.getvalue(),
-            file_name=f"cartera_scored_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv",
-            mime="text/csv",
-            type="primary",
+def page_estrategias():
+    st.title("🎯 Estrategias de Cobranza de Clase Mundial")
+    st.caption("Basadas en metodologías de Hoist Finance, Encore Capital, FICO TRIAD, COFACE e Intrum.")
+
+    for seg, color_hex in [("ALTO", "#27ae60"), ("MEDIO", "#f39c12"), ("BAJO", "#e74c3c")]:
+        e = ESTRATEGIAS[seg]
+        score_rng = {"ALTO": "67–100", "MEDIO": "34–66", "BAJO": "1–33"}[seg]
+
+        st.markdown(f"""
+<div style="border-left: 5px solid {color_hex}; padding: 16px 20px; background: #1a1a2e;
+     border-radius: 8px; margin-bottom: 20px;">
+<h3 style="color:{color_hex}; margin:0">Segmento {seg} &nbsp;|&nbsp; Score {score_rng}</h3>
+</div>
+""", unsafe_allow_html=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown(f"**📱 Canal:** {e['canal']}")
+            st.markdown(f"**⚡ Acción:** {e['accion']}")
+            st.markdown(f"**💰 Oferta:** {e['oferta']}")
+            st.markdown(f"**📅 Frecuencia:** {e['frecuencia']}")
+        with c2:
+            st.markdown(f"**📈 KPIs Objetivo:** {e['kpis']}")
+            st.markdown(f"**⬆️ Escalación:** {e['escalacion']}")
+            st.markdown(f"**📚 Referencia:** {e['referencia']}")
+
+        with st.expander(f"📝 Script / Guión para Segmento {seg}"):
+            st.info(e["script"])
+
+        st.divider()
+
+    st.subheader("Tabla de Comparación Rápida")
+    comp = pd.DataFrame([
+        {"Métrica": "Costo por contacto",
+         "ALTO": "S/ 0.10–0.30", "MEDIO": "S/ 2.00–3.50", "BAJO": "S/ 10–25"},
+        {"Métrica": "Tasa de conversión objetivo",
+         "ALTO": "≥ 20%", "MEDIO": "PTP ≥ 30%", "BAJO": "Settlement ≥ 15%"},
+        {"Métrica": "Canal principal",
+         "ALTO": "WhatsApp / SMS", "MEDIO": "Marcador + Agente", "BAJO": "Especialista / Legal"},
+        {"Métrica": "Frecuencia máxima",
+         "ALTO": "2/semana", "MEDIO": "3/día (máx)", "BAJO": "1/semana"},
+        {"Métrica": "ROI estimado",
+         "ALTO": "400–600%", "MEDIO": "150–300%", "BAJO": "50–150%"},
+    ])
+    st.dataframe(comp, hide_index=True, use_container_width=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PÁGINA: ADMIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def page_admin():
+    if st.session_state["user"]["rol"] != "admin":
+        st.error("Acceso denegado. Solo para Administradores.")
+        return
+
+    st.title("⚙️ Panel de Administración")
+    tab1, tab2, tab3 = st.tabs(["👥 Usuarios", "➕ Crear Usuario", "🔑 Cambiar Contraseña"])
+
+    with tab1:
+        st.subheader("Usuarios del Sistema")
+        df_users = get_all_users()
+        st.dataframe(
+            df_users,
+            hide_index=True,
             use_container_width=True,
+            column_config={
+                "activo": st.column_config.CheckboxColumn("Activo"),
+                "rol": st.column_config.SelectboxColumn("Rol", options=["admin", "colaborador"]),
+            },
         )
 
-    with col_exp2:
-        excel_buffer = io.BytesIO()
-        with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-            df_dialer.to_excel(writer, index=False, sheet_name="Cartera Scored")
-            df_filtered.groupby("segmento").agg(
-                clientes=("cliente_id", "count"),
-                score_prom=("score_operativo", "mean"),
-                prob_pago_prom=("prob_pago", "mean"),
-            ).to_excel(writer, sheet_name="Resumen Segmentos")
-        st.download_button(
-            label="⬇️ Descargar Excel Completo",
-            data=excel_buffer.getvalue(),
-            file_name=f"reporte_cobranza_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+        st.subheader("Activar / Desactivar Usuario")
+        usernames = df_users["username"].tolist()
+        current_user = st.session_state["user"]["username"]
+        opciones = [u for u in usernames if u != current_user]
+        if opciones:
+            sel = st.selectbox("Selecciona usuario", opciones)
+            if st.button(f"Cambiar estado de '{sel}'"):
+                toggle_user_status(sel)
+                st.success(f"Estado de '{sel}' cambiado.")
+                st.rerun()
+
+    with tab2:
+        st.subheader("Crear Nuevo Usuario")
+        with st.form("crear_usuario"):
+            col1, col2 = st.columns(2)
+            nuevo_user = col1.text_input("Username")
+            nuevo_nombre = col2.text_input("Nombre completo")
+            nuevo_email = col1.text_input("Email")
+            nuevo_rol = col2.selectbox("Rol", ["colaborador", "admin"])
+            nueva_pass = st.text_input("Contraseña", type="password")
+            confirmar_pass = st.text_input("Confirmar contraseña", type="password")
+            crear = st.form_submit_button("Crear Usuario", type="primary")
+
+        if crear:
+            if nueva_pass != confirmar_pass:
+                st.error("Las contraseñas no coinciden.")
+            elif not nuevo_user or not nuevo_nombre:
+                st.error("Username y nombre son obligatorios.")
+            else:
+                ok, msg = create_user(nuevo_user, nueva_pass, nuevo_nombre, nuevo_email, nuevo_rol)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+
+    with tab3:
+        st.subheader("Cambiar Contraseña de Usuario")
+        df_users = get_all_users()
+        with st.form("cambiar_pass"):
+            user_sel = st.selectbox("Usuario", df_users["username"].tolist())
+            pass_nueva = st.text_input("Nueva contraseña", type="password")
+            pass_conf = st.text_input("Confirmar contraseña", type="password")
+            cambiar = st.form_submit_button("Actualizar Contraseña", type="primary")
+
+        if cambiar:
+            if pass_nueva != pass_conf:
+                st.error("Las contraseñas no coinciden.")
+            else:
+                ok, msg = update_password(user_sel, pass_nueva)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN ROUTER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    init_db()
+
+    if "user" not in st.session_state:
+        show_login()
+        return
+
+    show_sidebar()
+
+    page = st.session_state.get("page", "inicio")
+    routes = {
+        "inicio":      page_inicio,
+        "cargar":      page_cargar,
+        "analisis":    page_analisis,
+        "historial":   page_historial,
+        "estrategias": page_estrategias,
+        "admin":       page_admin,
+    }
+    routes.get(page, page_inicio)()
+
+
+if __name__ == "__main__":
+    main()
