@@ -23,7 +23,7 @@ from sklearn.metrics import (
 
 from preprocessing import FeatureEngineer, build_preprocessor, CATEGORICAL_FEATURES
 
-MODELS_DIR = Path("models")
+MODELS_DIR = Path(__file__).parent.parent / "models"
 MODELS_DIR.mkdir(exist_ok=True)
 
 

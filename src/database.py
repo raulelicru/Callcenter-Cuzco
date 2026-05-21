@@ -9,7 +9,8 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 
-DB_PATH = Path("data/callcenter.db")
+# Ruta absoluta relativa al archivo — funciona sin importar desde dónde se ejecute
+DB_PATH = Path(__file__).parent.parent / "data" / "callcenter.db"
 DB_PATH.parent.mkdir(exist_ok=True)
 
 
