@@ -180,8 +180,8 @@ def show_login():
     col1, col2, col3 = st.columns([1, 1.2, 1])
     with col2:
         st.markdown("<br><br>", unsafe_allow_html=True)
-        st.markdown("## 📊 Sistema de Cobranza")
-        st.markdown("**Call Center Cuzco** — Score Predictivo")
+        st.markdown("## Sistema de Cobranza")
+        st.markdown("**Call Center Cuzco** - Score Predictivo")
         st.divider()
 
         with st.form("login_form"):
