@@ -175,6 +175,50 @@ def load_model():
     return joblib.load(p) if p.exists() else None
 
 
+def _generate_plan(row) -> str:
+    """Genera un plan de accion personalizado por cliente segun su perfil."""
+    seg     = str(row.get("segmento", "MEDIO"))
+    dpd     = int(row.get("dpd", 0) or 0)
+    saldo   = float(row.get("saldo_total", 0) or 0)
+    rpc     = float(row.get("rpc_rate", 0) or 0)
+    estado  = str(row.get("ultimo_estado_marcado", "") or "")
+    p_rotas = int(row.get("promesas_rotas", 0) or 0)
+
+    if seg == "ALTO":
+        if rpc >= 0.55:
+            return (f"[WhatsApp] Enviar hoy: 'Hola [Nombre], tienes S/{saldo:,.0f} pendiente. "
+                    f"Pagalo hoy y evitamos mas cargos. Ingresa aqui: [link_pago]'")
+        elif rpc >= 0.25:
+            return f"[SMS] Automatico: 'Deuda S/{saldo:,.0f}. Paga en [link]. Consultas: [tel]'"
+        else:
+            return f"[IVR] Llamada automatica de recordatorio: saldo S/{saldo:,.0f}"
+
+    elif seg == "MEDIO":
+        if p_rotas >= 2:
+            return (f"[Llamada urgente] {p_rotas} PTPs rotas. Agente negocia nueva fecha "
+                    f"con compromiso formal. Saldo S/{saldo:,.0f}")
+        elif "PROMESA" in estado.upper():
+            return (f"[WhatsApp] Seguimiento PTP: 'Recordamos su compromiso de pago "
+                    f"S/{saldo:,.0f}. Confirme si cumplira en la fecha acordada.'")
+        else:
+            cuota = saldo / 3
+            return (f"[Marcador + Agente] Ofrecer 3 cuotas de S/{cuota:,.0f} "
+                    f"con condonacion de intereses. DPD={dpd} dias.")
+
+    else:  # BAJO
+        if dpd > 150:
+            desc = 40
+        elif dpd > 90:
+            desc = 25
+        elif dpd > 60:
+            desc = 15
+        else:
+            desc = 10
+        settlement = saldo * (1 - desc / 100)
+        return (f"[Agente Senior] Settlement S/{settlement:,.0f} (quita {desc}% "
+                f"sobre S/{saldo:,.0f}). Llamada directa + SMS seguimiento. DPD={dpd} dias.")
+
+
 def score_df(df_raw, pipeline):
     from model import score_portfolio
     df_s = score_portfolio(df_raw, pipeline)
@@ -193,29 +237,57 @@ def process_upload(df_raw, pipeline, usuario, filename):
         else:
             df_raw.insert(0, "cliente_id", [f"CLI-{i:06d}" for i in range(1, len(df_raw)+1)])
 
-    ids = df_raw["cliente_id"].astype(str).tolist()
+    # ── Deduplicacion: eliminar registros repetidos por cliente_id ──────────────
+    df_raw["cliente_id"] = df_raw["cliente_id"].astype(str)
+    n_original   = len(df_raw)
+    df_raw       = df_raw.drop_duplicates(subset=["cliente_id"], keep="last").reset_index(drop=True)
+    n_duplicados = n_original - len(df_raw)
+
+    # ── Detectar conocidos vs nuevos en BD ──────────────────────────────────────
+    ids = df_raw["cliente_id"].tolist()
     df_ex = get_clientes_by_ids(ids)
     ids_conocidos = set(df_ex["cliente_id"].tolist()) if len(df_ex) > 0 else set()
     n_conocidos = sum(1 for i in ids if i in ids_conocidos)
-    n_nuevos = len(ids) - n_conocidos
+    n_nuevos    = len(ids) - n_conocidos
 
+    # ── Scoring + estrategia + plan personalizado ───────────────────────────────
     df_scored = score_df(df_raw, pipeline)
-    df_scored["es_nuevo"] = ~df_scored["cliente_id"].isin(ids_conocidos)
-    df_scored["estado_carga"] = df_scored["es_nuevo"].map({True: "Nuevo", False: "Actualizado"})
+    df_scored["es_nuevo"]         = ~df_scored["cliente_id"].isin(ids_conocidos)
+    df_scored["estado_carga"]     = df_scored["es_nuevo"].map({True: "Nuevo", False: "Actualizado"})
+    df_scored["plan_personalizado"] = df_scored.apply(_generate_plan, axis=1)
 
+    # ── Guardar en BD ───────────────────────────────────────────────────────────
     carga_id = log_carga(usuario, filename, len(df_scored), n_nuevos, n_conocidos)
     upsert_clientes_batch(df_scored, carga_id)
-    return df_scored, {"total": len(df_scored), "nuevos": n_nuevos, "conocidos": n_conocidos}
+
+    return df_scored, {
+        "total":        len(df_scored),
+        "nuevos":       n_nuevos,
+        "conocidos":    n_conocidos,
+        "duplicados":   n_duplicados,
+        "original":     n_original,
+    }
 
 
 def export_excel(df):
     buf = io.BytesIO()
+    plan_cols = [c for c in [
+        "cliente_id", "score_operativo", "segmento", "plan_personalizado",
+        "dpd", "saldo_total", "prob_pago", "rpc_rate", "bucket_mora",
+        "estrategia_canal", "estrategia_oferta", "estado_carga",
+    ] if c in df.columns]
+
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        df.to_excel(w, index=False, sheet_name="Cartera Completa")
+        # Hoja 1: Plan personalizado por cliente (la mas importante)
+        df[plan_cols].sort_values("score_operativo", ascending=False).to_excel(
+            w, index=False, sheet_name="Plan por Cliente"
+        )
+        # Hoja 2-4: Por segmento con plan
         for seg in ["ALTO", "MEDIO", "BAJO"]:
-            sub = df[df["segmento"] == seg]
+            sub = df[df["segmento"] == seg][plan_cols]
             if len(sub) > 0:
                 sub.to_excel(w, index=False, sheet_name=f"Segmento {seg}")
+        # Hoja 5: Resumen ejecutivo
         resumen = (
             df.groupby("segmento")
             .agg(clientes=("cliente_id","count"), score_prom=("score_operativo","mean"),
@@ -224,6 +296,7 @@ def export_excel(df):
         )
         resumen["pct_cartera"] = (resumen["clientes"] / len(df) * 100).round(1)
         resumen.to_excel(w, sheet_name="Resumen Ejecutivo")
+        # Hoja 6: Guia de estrategias
         guia = pd.DataFrame([
             {"Segmento": s, "Canal": ESTRATEGIAS[s]["canal"],
              "Accion": ESTRATEGIAS[s]["accion"], "Oferta": ESTRATEGIAS[s]["oferta"],
@@ -499,27 +572,33 @@ def page_cargar():
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("### Resultado del Procesamiento")
 
-        r1, r2, r3 = st.columns(3)
-        with r1: card_metrica("Total Procesado", f"{stats['total']:,}", color="#3b82f6")
-        with r2: card_metrica("Ya en BD (actualizados)", f"{stats['conocidos']:,}",
-                               f"{stats['conocidos']/stats['total']*100:.1f}%", "#27ae60")
-        with r3: card_metrica("Clientes Nuevos", f"{stats['nuevos']:,}",
-                               f"{stats['nuevos']/stats['total']*100:.1f}%", "#8b5cf6")
+        # ── Fila 1: resumen del archivo ──────────────────────────────────────────
+        r1, r2, r3, r4 = st.columns(4)
+        with r1: card_metrica("Registros en archivo",    f"{stats['original']:,}",  color="#3b82f6")
+        with r2: card_metrica("Duplicados eliminados",   f"{stats['duplicados']:,}", f"misma clienta, se quedo la mas reciente", "#f39c12")
+        with r3: card_metrica("Cartera unica procesada", f"{stats['total']:,}",      color="#3b82f6")
+        with r4: card_metrica("Cartera NUEVA (no estaba en BD)", f"{stats['nuevos']:,}",
+                               f"{stats['nuevos']/max(stats['total'],1)*100:.1f}% de la carga", "#8b5cf6")
 
         st.markdown("<br>", unsafe_allow_html=True)
+
+        # ── Fila 2: segmentos ────────────────────────────────────────────────────
         sc = df_result["segmento"].value_counts()
         s1, s2, s3 = st.columns(3)
-        with s1: card_metrica("Segmento ALTO",  f"{sc.get('ALTO',0):,}", color="#27ae60")
-        with s2: card_metrica("Segmento MEDIO", f"{sc.get('MEDIO',0):,}", color="#f39c12")
-        with s3: card_metrica("Segmento BAJO",  f"{sc.get('BAJO',0):,}", color="#e74c3c")
+        with s1: card_metrica("Segmento ALTO",  f"{sc.get('ALTO',0):,}",
+                               "Llamada IVR / WhatsApp / SMS", "#27ae60")
+        with s2: card_metrica("Segmento MEDIO", f"{sc.get('MEDIO',0):,}",
+                               "Marcador predictivo + Agente", "#f39c12")
+        with s3: card_metrica("Segmento BAJO",  f"{sc.get('BAJO',0):,}",
+                               "Agente Senior + SMS urgente", "#e74c3c")
 
         st.divider()
-        st.markdown("### Cartera Segmentada")
+        st.markdown("### Cartera con Plan Personalizado")
+        st.caption("Cada clienta tiene su accion especifica segun score, mora, contactabilidad y promesas.")
 
         cols_show = [c for c in [
-            "cliente_id", "score_operativo", "segmento", "prob_pago",
-            "estrategia_canal", "estrategia_oferta", "dpd",
-            "saldo_total", "bucket_mora", "estado_carga",
+            "cliente_id", "score_operativo", "segmento", "plan_personalizado",
+            "dpd", "saldo_total", "prob_pago", "bucket_mora", "estado_carga",
         ] if c in df_result.columns]
 
         st.dataframe(
@@ -527,11 +606,10 @@ def page_cargar():
             hide_index=True,
             use_container_width=True,
             column_config={
-                "score_operativo": st.column_config.ProgressColumn(
-                    "Score", min_value=1, max_value=100
-                ),
-                "prob_pago": st.column_config.NumberColumn("Prob. Pago", format="%.1%"),
-                "saldo_total": st.column_config.NumberColumn("Saldo Total", format="S/ %.2f"),
+                "score_operativo":   st.column_config.ProgressColumn("Score", min_value=1, max_value=100),
+                "prob_pago":         st.column_config.NumberColumn("Prob. Pago", format="%.1%"),
+                "saldo_total":       st.column_config.NumberColumn("Saldo", format="S/ %.0f"),
+                "plan_personalizado":st.column_config.TextColumn("Plan de Accion", width="large"),
             },
         )
         st.caption(f"Mostrando primeros 500 de {len(df_result):,} registros.")
