@@ -1,315 +1,150 @@
 """
-Base de Datos PostgreSQL — Supabase
-====================================
-Usa psycopg3 (psycopg[binary]) compatible con Python 3.12, 3.13, 3.14+.
+Base de Datos — Supabase via HTTPS (supabase-py)
+Conecta por HTTP/HTTPS: sin problemas de IPv4/IPv6.
 """
-
-import psycopg
-from psycopg.rows import dict_row
+from supabase import create_client, Client
 import pandas as pd
 from datetime import datetime
 import os
 
 
-def _force_ipv4(host: str, port: int) -> str:
-    """Resuelve el hostname a IPv4 para evitar problemas con IPv6 en Streamlit Cloud."""
-    import socket
-    try:
-        results = socket.getaddrinfo(host, port, socket.AF_INET)
-        if results:
-            return results[0][4][0]
-    except Exception:
-        pass
-    return host
-
-
-def get_db_params() -> dict:
+def get_client() -> Client:
     try:
         import streamlit as st
-        s = st.secrets["database"]
-        host = s["host"]
-        port = int(s["port"])
-        return dict(host=_force_ipv4(host, port), port=port, dbname=s["dbname"],
-                    user=s["user"], password=s["password"], sslmode="require")
+        s = st.secrets["supabase"]
+        return create_client(str(s["url"]), str(s["key"]))
     except Exception:
-        url = os.environ.get("DATABASE_URL", "")
-        if url:
-            import urllib.parse as up
-            r = up.urlparse(url)
-            port = r.port or 5432
-            return dict(host=_force_ipv4(r.hostname, port), port=port,
-                        dbname=r.path.lstrip("/"), user=r.username,
-                        password=r.password, sslmode="require")
-        raise RuntimeError("No se encontraron credenciales de base de datos.")
-
-
-def get_connection():
-    params = get_db_params()
-    errors = []
-    # Intento 1: con los parámetros tal como están (host ya resuelto a IPv4 si es posible)
-    try:
-        return psycopg.connect(**params, row_factory=dict_row, connect_timeout=15)
-    except Exception as e:
-        errors.append(f"intento1({params.get('host','?')}): {e}")
-
-    # Intento 2: host original sin resolver (por si el IPv4 era del pooler incorrecto)
-    try:
-        import streamlit as st
-        s = st.secrets["database"]
-        params2 = dict(host=s["host"], port=int(s["port"]), dbname=s["dbname"],
-                       user=s["user"], password=s["password"], sslmode="require")
-        if params2["host"] != params["host"]:
-            return psycopg.connect(**params2, row_factory=dict_row, connect_timeout=15)
-    except Exception as e:
-        errors.append(f"intento2(original): {e}")
-
-    pwd = params.get("password", "")
-    msgs = " | ".join(str(e).replace(pwd, "***") for e in errors)
-    raise RuntimeError(
-        f"DB_CONNECT_ERROR | host={params.get('host','?')} port={params.get('port','?')} "
-        f"user={params.get('user','?')} | {msgs}"
-    ) from None
-
-
-def _batch_execute(cur, sql_template: str, rows: list, page_size: int = 1000):
-    """Reemplaza execute_values de psycopg2: construye multi-row VALUES manualmente."""
-    if not rows:
-        return
-    num_cols = len(rows[0])
-    row_ph = f"({','.join(['%s'] * num_cols)})"
-
-    for i in range(0, len(rows), page_size):
-        batch = rows[i:i + page_size]
-        values_clause = ", ".join([row_ph] * len(batch))
-        flat = [v for row in batch for v in row]
-        sql = sql_template.replace("VALUES %s", f"VALUES {values_clause}")
-        cur.execute(sql, flat)
+        url = os.environ.get("SUPABASE_URL", "")
+        key = os.environ.get("SUPABASE_KEY", "")
+        if url and key:
+            return create_client(url, key)
+        raise RuntimeError(
+            "No se encontraron credenciales. "
+            "Configura st.secrets['supabase']['url'] y ['key']."
+        )
 
 
 def init_db():
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS clientes (
-            cliente_id            TEXT PRIMARY KEY,
-            score_operativo       INTEGER,
-            segmento              TEXT,
-            prob_pago             REAL,
-            dpd                   INTEGER,
-            bucket_mora           TEXT,
-            saldo_total           REAL,
-            rpc_rate              REAL,
-            ultimo_estado_marcado TEXT,
-            estrategia_canal      TEXT,
-            estrategia_accion     TEXT,
-            estrategia_oferta     TEXT,
-            veces_procesado       INTEGER DEFAULT 1,
-            fecha_primera_carga   TEXT,
-            fecha_ultima_carga    TEXT
+    """Verifica que las tablas existan. Si no, muestra instrucciones."""
+    client = get_client()
+    try:
+        client.table("usuarios").select("id").limit(1).execute()
+    except Exception as e:
+        raise RuntimeError(
+            f"Tablas no encontradas. Ejecuta src/setup_supabase.sql en el "
+            f"SQL Editor de Supabase (supabase.com → SQL Editor). Error: {e}"
         )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS historial_scores (
-            id              SERIAL PRIMARY KEY,
-            cliente_id      TEXT,
-            score_operativo INTEGER,
-            segmento        TEXT,
-            prob_pago       REAL,
-            dpd             INTEGER,
-            saldo_total     REAL,
-            fecha_score     TEXT,
-            carga_id        INTEGER
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS cargas (
-            id                     SERIAL PRIMARY KEY,
-            usuario                TEXT,
-            filename               TEXT,
-            total_registros        INTEGER,
-            registros_nuevos       INTEGER,
-            registros_actualizados INTEGER,
-            fecha_carga            TEXT
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            id             SERIAL PRIMARY KEY,
-            username       TEXT UNIQUE NOT NULL,
-            nombre         TEXT NOT NULL,
-            email          TEXT,
-            rol            TEXT NOT NULL,
-            password_hash  TEXT NOT NULL,
-            activo         INTEGER DEFAULT 1,
-            fecha_creacion TEXT DEFAULT CURRENT_DATE::TEXT
-        )
-    """)
-
-    conn.commit()
-    cur.close()
-    conn.close()
 
 
 def get_clientes_by_ids(ids: list) -> pd.DataFrame:
     if not ids:
         return pd.DataFrame()
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM clientes WHERE cliente_id = ANY(%s)", (ids,))
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
+    client = get_client()
+    all_rows = []
+    for i in range(0, len(ids), 500):
+        resp = client.table("clientes").select("*").in_("cliente_id", ids[i:i+500]).execute()
+        all_rows.extend(resp.data or [])
+    return pd.DataFrame(all_rows) if all_rows else pd.DataFrame()
 
 
 def upsert_clientes_batch(df: pd.DataFrame, carga_id: int) -> dict:
-    conn = get_connection()
-    cur = conn.cursor()
+    client = get_client()
     today = datetime.today().strftime("%Y-%m-%d")
 
-    rows = []
-    for _, row in df.iterrows():
-        rows.append((
-            str(row.get("cliente_id", "")),
-            int(row.get("score_operativo", 0) or 0),
-            str(row.get("segmento", "")),
-            float(row.get("prob_pago", 0) or 0),
-            int(row.get("dpd", 0) or 0),
-            str(row.get("bucket_mora", "")),
-            float(row.get("saldo_total", 0) or 0),
-            float(row.get("rpc_rate", 0) or 0),
-            str(row.get("ultimo_estado_marcado", "")),
-            str(row.get("estrategia_canal", "")),
-            str(row.get("estrategia_accion", "")),
-            str(row.get("estrategia_oferta", "")),
-            today,
-        ))
+    # Detectar nuevos vs existentes antes del upsert
+    all_ids = df["cliente_id"].astype(str).tolist()
+    df_ex = get_clientes_by_ids(all_ids)
+    existing_ids = set(df_ex["cliente_id"].tolist()) if len(df_ex) > 0 else set()
+    nuevos      = sum(1 for i in all_ids if i not in existing_ids)
+    actualizados = len(all_ids) - nuevos
 
-    _batch_execute(cur, """
-        INSERT INTO clientes (
-            cliente_id, score_operativo, segmento, prob_pago, dpd,
-            bucket_mora, saldo_total, rpc_rate, ultimo_estado_marcado,
-            estrategia_canal, estrategia_accion, estrategia_oferta,
-            fecha_primera_carga, fecha_ultima_carga
-        ) VALUES %s
-        ON CONFLICT (cliente_id) DO UPDATE SET
-            score_operativo       = EXCLUDED.score_operativo,
-            segmento              = EXCLUDED.segmento,
-            prob_pago             = EXCLUDED.prob_pago,
-            dpd                   = EXCLUDED.dpd,
-            bucket_mora           = EXCLUDED.bucket_mora,
-            saldo_total           = EXCLUDED.saldo_total,
-            rpc_rate              = EXCLUDED.rpc_rate,
-            ultimo_estado_marcado = EXCLUDED.ultimo_estado_marcado,
-            estrategia_canal      = EXCLUDED.estrategia_canal,
-            estrategia_accion     = EXCLUDED.estrategia_accion,
-            estrategia_oferta     = EXCLUDED.estrategia_oferta,
-            veces_procesado       = clientes.veces_procesado + 1,
-            fecha_ultima_carga    = EXCLUDED.fecha_ultima_carga
-    """, rows, page_size=1000)
-
-    ids = [r[0] for r in rows]
-    cur.execute(
-        "SELECT COUNT(*) as n FROM clientes WHERE cliente_id = ANY(%s) AND fecha_primera_carga = %s",
-        (ids, today)
-    )
-    nuevos = cur.fetchone()["n"]
-    actualizados = len(rows) - nuevos
-
-    hist_rows = [
-        (str(row.get("cliente_id", "")), int(row.get("score_operativo", 0) or 0),
-         str(row.get("segmento", "")), float(row.get("prob_pago", 0) or 0),
-         int(row.get("dpd", 0) or 0), float(row.get("saldo_total", 0) or 0),
-         today, carga_id)
+    records = [
+        {
+            "cliente_id":            str(row.get("cliente_id", "")),
+            "score_operativo":       int(row.get("score_operativo", 0) or 0),
+            "segmento":              str(row.get("segmento", "")),
+            "prob_pago":             float(row.get("prob_pago", 0) or 0),
+            "dpd":                   int(row.get("dpd", 0) or 0),
+            "bucket_mora":           str(row.get("bucket_mora", "")),
+            "saldo_total":           float(row.get("saldo_total", 0) or 0),
+            "rpc_rate":              float(row.get("rpc_rate", 0) or 0),
+            "ultimo_estado_marcado": str(row.get("ultimo_estado_marcado", "")),
+            "estrategia_canal":      str(row.get("estrategia_canal", "")),
+            "estrategia_accion":     str(row.get("estrategia_accion", "")),
+            "estrategia_oferta":     str(row.get("estrategia_oferta", "")),
+            "fecha_primera_carga":   today,
+            "fecha_ultima_carga":    today,
+        }
         for _, row in df.iterrows()
     ]
-    _batch_execute(cur, """
-        INSERT INTO historial_scores
-            (cliente_id, score_operativo, segmento, prob_pago, dpd, saldo_total, fecha_score, carga_id)
-        VALUES %s
-    """, hist_rows, page_size=1000)
 
-    conn.commit()
-    cur.close()
-    conn.close()
+    # Upsert en lotes — el trigger protege fecha_primera_carga y veces_procesado
+    CHUNK = 1000
+    for i in range(0, len(records), CHUNK):
+        client.table("clientes").upsert(
+            records[i:i+CHUNK], on_conflict="cliente_id"
+        ).execute()
+
+    # Historial en lotes
+    hist = [
+        {
+            "cliente_id":      str(row.get("cliente_id", "")),
+            "score_operativo": int(row.get("score_operativo", 0) or 0),
+            "segmento":        str(row.get("segmento", "")),
+            "prob_pago":       float(row.get("prob_pago", 0) or 0),
+            "dpd":             int(row.get("dpd", 0) or 0),
+            "saldo_total":     float(row.get("saldo_total", 0) or 0),
+            "fecha_score":     today,
+            "carga_id":        carga_id,
+        }
+        for _, row in df.iterrows()
+    ]
+    for i in range(0, len(hist), CHUNK):
+        client.table("historial_scores").insert(hist[i:i+CHUNK]).execute()
+
     return {"nuevos": nuevos, "actualizados": actualizados}
 
 
 def log_carga(usuario: str, filename: str, total: int, nuevos: int, actualizados: int) -> int:
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO cargas (usuario, filename, total_registros, registros_nuevos, registros_actualizados, fecha_carga)
-        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
-    """, (usuario, filename, total, nuevos, actualizados, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    carga_id = cur.fetchone()["id"]
-    conn.commit()
-    cur.close()
-    conn.close()
-    return carga_id
+    client = get_client()
+    resp = client.table("cargas").insert({
+        "usuario":                usuario,
+        "filename":               filename,
+        "total_registros":        total,
+        "registros_nuevos":       nuevos,
+        "registros_actualizados": actualizados,
+        "fecha_carga":            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }).execute()
+    return resp.data[0]["id"]
 
 
 def get_cargas_historico() -> pd.DataFrame:
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM cargas ORDER BY fecha_carga DESC LIMIT 100")
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
+    client = get_client()
+    resp = client.table("cargas").select("*").order("fecha_carga", desc=True).limit(100).execute()
+    return pd.DataFrame(resp.data) if resp.data else pd.DataFrame()
 
 
 def get_metricas_globales() -> dict:
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("SELECT COUNT(*) as n FROM clientes")
-    total = cur.fetchone()["n"]
-
-    cur.execute("""
-        SELECT segmento, COUNT(*) as n,
-               AVG(score_operativo) as avg_s,
-               SUM(saldo_total) as saldo
-        FROM clientes GROUP BY segmento
-    """)
-    por_segmento = {}
-    for r in cur.fetchall():
-        por_segmento[r["segmento"]] = {
-            "count": r["n"],
-            "avg_score": round(float(r["avg_s"] or 0), 1),
-            "saldo": round(float(r["saldo"] or 0), 2),
-        }
-
-    cur.execute("SELECT AVG(score_operativo) as s, AVG(prob_pago) as p FROM clientes")
-    r = cur.fetchone()
-
-    cur.execute("SELECT SUM(saldo_total) as s FROM clientes")
-    saldo = cur.fetchone()["s"] or 0
-
-    cur.execute("SELECT COUNT(*) as n FROM cargas")
-    total_cargas = cur.fetchone()["n"]
-
-    cur.close()
-    conn.close()
+    client = get_client()
+    resp = client.rpc("get_metricas_globales").execute()
+    data = resp.data or {}
     return {
-        "total_clientes": total,
-        "por_segmento": por_segmento,
-        "avg_score": round(float(r["s"] or 0), 1),
-        "avg_prob_pago": round(float(r["p"] or 0) * 100, 1),
-        "saldo_total": float(saldo),
-        "total_cargas": total_cargas,
+        "total_clientes": data.get("total_clientes", 0),
+        "por_segmento":   data.get("por_segmento", {}),
+        "avg_score":      float(data.get("avg_score", 0)),
+        "avg_prob_pago":  float(data.get("avg_prob_pago", 0)),
+        "saldo_total":    float(data.get("saldo_total", 0)),
+        "total_cargas":   data.get("total_cargas", 0),
     }
 
 
 def get_all_clientes_df(limit: int = 10000) -> pd.DataFrame:
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM clientes ORDER BY score_operativo DESC LIMIT %s", (limit,))
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
+    client = get_client()
+    resp = (
+        client.table("clientes")
+        .select("*")
+        .order("score_operativo", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return pd.DataFrame(resp.data) if resp.data else pd.DataFrame()
