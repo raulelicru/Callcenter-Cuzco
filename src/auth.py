@@ -37,7 +37,6 @@ def authenticate(username: str, password: str):
 
 
 def create_user(username: str, password: str, nombre: str, email: str, rol: str):
-    import psycopg2
     if rol not in ("admin", "colaborador"):
         return False, "Rol invalido."
     if len(password) < 6:
@@ -53,10 +52,11 @@ def create_user(username: str, password: str, nombre: str, email: str, rol: str)
         cur.close()
         conn.close()
         return True, f"Usuario '{username}' creado."
-    except psycopg2.errors.UniqueViolation:
-        return False, f"El usuario '{username}' ya existe."
     except Exception as e:
-        return False, str(e)
+        err = str(e)
+        if "unique" in err.lower() or "UniqueViolation" in err:
+            return False, f"El usuario '{username}' ya existe."
+        return False, err
 
 
 def get_all_users() -> pd.DataFrame:
@@ -66,7 +66,7 @@ def get_all_users() -> pd.DataFrame:
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
 def toggle_user_status(username: str) -> bool:

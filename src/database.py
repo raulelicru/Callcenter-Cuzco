@@ -1,18 +1,17 @@
 """
 Base de Datos PostgreSQL — Supabase
 ====================================
-Usa st.secrets en Streamlit Cloud, variable de entorno DATABASE_URL en local.
+Usa psycopg3 (psycopg[binary]) compatible con Python 3.12, 3.13, 3.14+.
 """
 
-import psycopg2
-from psycopg2.extras import RealDictCursor, execute_values
+import psycopg
+from psycopg.rows import dict_row
 import pandas as pd
 from datetime import datetime
 import os
 
 
 def get_db_params() -> dict:
-    """Obtiene credenciales desde Streamlit secrets o variables de entorno."""
     try:
         import streamlit as st
         s = st.secrets["database"]
@@ -29,11 +28,25 @@ def get_db_params() -> dict:
 
 
 def get_connection():
-    return psycopg2.connect(**get_db_params(), cursor_factory=RealDictCursor)
+    return psycopg.connect(**get_db_params(), row_factory=dict_row)
+
+
+def _batch_execute(cur, sql_template: str, rows: list, page_size: int = 1000):
+    """Reemplaza execute_values de psycopg2: construye multi-row VALUES manualmente."""
+    if not rows:
+        return
+    num_cols = len(rows[0])
+    row_ph = f"({','.join(['%s'] * num_cols)})"
+
+    for i in range(0, len(rows), page_size):
+        batch = rows[i:i + page_size]
+        values_clause = ", ".join([row_ph] * len(batch))
+        flat = [v for row in batch for v in row]
+        sql = sql_template.replace("VALUES %s", f"VALUES {values_clause}")
+        cur.execute(sql, flat)
 
 
 def init_db():
-    """Crea todas las tablas si no existen."""
     conn = get_connection()
     cur = conn.cursor()
 
@@ -102,7 +115,6 @@ def init_db():
 
 
 def get_clientes_by_ids(ids: list) -> pd.DataFrame:
-    """Usa ANY(%s) de PostgreSQL — sin límite de variables."""
     if not ids:
         return pd.DataFrame()
     conn = get_connection()
@@ -111,14 +123,10 @@ def get_clientes_by_ids(ids: list) -> pd.DataFrame:
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
 def upsert_clientes_batch(df: pd.DataFrame, carga_id: int) -> dict:
-    """
-    Upsert masivo con execute_values — optimizado para 350K+ registros.
-    INSERT ... ON CONFLICT DO UPDATE garantiza atomicidad.
-    """
     conn = get_connection()
     cur = conn.cursor()
     today = datetime.today().strftime("%Y-%m-%d")
@@ -141,7 +149,7 @@ def upsert_clientes_batch(df: pd.DataFrame, carga_id: int) -> dict:
             today,
         ))
 
-    execute_values(cur, """
+    _batch_execute(cur, """
         INSERT INTO clientes (
             cliente_id, score_operativo, segmento, prob_pago, dpd,
             bucket_mora, saldo_total, rpc_rate, ultimo_estado_marcado,
@@ -164,21 +172,22 @@ def upsert_clientes_batch(df: pd.DataFrame, carga_id: int) -> dict:
             fecha_ultima_carga    = EXCLUDED.fecha_ultima_carga
     """, rows, page_size=1000)
 
-    # Contar nuevos vs actualizados
     ids = [r[0] for r in rows]
-    cur.execute("SELECT COUNT(*) as n FROM clientes WHERE cliente_id = ANY(%s) AND fecha_primera_carga = %s", (ids, today))
+    cur.execute(
+        "SELECT COUNT(*) as n FROM clientes WHERE cliente_id = ANY(%s) AND fecha_primera_carga = %s",
+        (ids, today)
+    )
     nuevos = cur.fetchone()["n"]
     actualizados = len(rows) - nuevos
 
-    # Historial en batch
     hist_rows = [
-        (str(row.get("cliente_id","")), int(row.get("score_operativo",0) or 0),
-         str(row.get("segmento","")), float(row.get("prob_pago",0) or 0),
-         int(row.get("dpd",0) or 0), float(row.get("saldo_total",0) or 0),
+        (str(row.get("cliente_id", "")), int(row.get("score_operativo", 0) or 0),
+         str(row.get("segmento", "")), float(row.get("prob_pago", 0) or 0),
+         int(row.get("dpd", 0) or 0), float(row.get("saldo_total", 0) or 0),
          today, carga_id)
         for _, row in df.iterrows()
     ]
-    execute_values(cur, """
+    _batch_execute(cur, """
         INSERT INTO historial_scores
             (cliente_id, score_operativo, segmento, prob_pago, dpd, saldo_total, fecha_score, carga_id)
         VALUES %s
@@ -195,7 +204,7 @@ def log_carga(usuario: str, filename: str, total: int, nuevos: int, actualizados
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO cargas (usuario, filename, total_registros, registros_nuevos, registros_actualizados, fecha_carga)
-        VALUES (%s,%s,%s,%s,%s,%s) RETURNING id
+        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
     """, (usuario, filename, total, nuevos, actualizados, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     carga_id = cur.fetchone()["id"]
     conn.commit()
@@ -211,7 +220,7 @@ def get_cargas_historico() -> pd.DataFrame:
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
 def get_metricas_globales() -> dict:
@@ -263,4 +272,4 @@ def get_all_clientes_df(limit: int = 10000) -> pd.DataFrame:
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
