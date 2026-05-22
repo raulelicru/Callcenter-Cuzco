@@ -249,7 +249,6 @@ def card_metrica(label, valor, delta=None, color="#3b82f6"):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def show_login():
-    init_db()
     _, col, _ = st.columns([1, 1.1, 1])
     with col:
         st.markdown("<br><br><br>", unsafe_allow_html=True)
@@ -838,8 +837,25 @@ def page_admin():
 # ROUTER PRINCIPAL
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _bootstrap_users():
+    """Crea usuarios por defecto si la tabla esta vacia (primera vez en Supabase)."""
+    try:
+        existing = get_all_users()
+        if len(existing) == 0:
+            defaults = [
+                ("admin",       "Admin2024!",  "Administrador", "admin@callcenter.com",      "admin"),
+                ("supervisor",  "Super2024!",  "Supervisor",    "supervisor@callcenter.com", "admin"),
+                ("colaborador", "Colab2024!",  "Colaborador",   "colab@callcenter.com",      "colaborador"),
+            ]
+            for username, password, nombre, email, rol in defaults:
+                create_user(username, password, nombre, email, rol)
+    except Exception:
+        pass
+
+
 def main():
     init_db()
+    _bootstrap_users()
     if "user" not in st.session_state:
         show_login()
         return
