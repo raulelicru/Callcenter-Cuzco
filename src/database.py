@@ -28,7 +28,16 @@ def get_db_params() -> dict:
 
 
 def get_connection():
-    return psycopg.connect(**get_db_params(), row_factory=dict_row)
+    params = get_db_params()
+    try:
+        return psycopg.connect(**params, row_factory=dict_row, connect_timeout=15)
+    except psycopg.OperationalError as e:
+        # Exponer el error real (sin credenciales) para diagnóstico
+        msg = str(e).replace(params.get("password", ""), "***")
+        raise psycopg.OperationalError(
+            f"No se pudo conectar a Supabase ({params.get('host','?')}:{params.get('port','?')}). "
+            f"Detalle: {msg}"
+        ) from None
 
 
 def _batch_execute(cur, sql_template: str, rows: list, page_size: int = 1000):
