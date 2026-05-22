@@ -11,19 +11,35 @@ from datetime import datetime
 import os
 
 
+def _force_ipv4(host: str, port: int) -> str:
+    """Resuelve el hostname a IPv4 para evitar problemas con IPv6 en Streamlit Cloud."""
+    import socket
+    try:
+        results = socket.getaddrinfo(host, port, socket.AF_INET)
+        if results:
+            return results[0][4][0]
+    except Exception:
+        pass
+    return host
+
+
 def get_db_params() -> dict:
     try:
         import streamlit as st
         s = st.secrets["database"]
-        return dict(host=s["host"], port=int(s["port"]), dbname=s["dbname"],
+        host = s["host"]
+        port = int(s["port"])
+        return dict(host=_force_ipv4(host, port), port=port, dbname=s["dbname"],
                     user=s["user"], password=s["password"], sslmode="require")
     except Exception:
         url = os.environ.get("DATABASE_URL", "")
         if url:
             import urllib.parse as up
             r = up.urlparse(url)
-            return dict(host=r.hostname, port=r.port or 5432, dbname=r.path.lstrip("/"),
-                        user=r.username, password=r.password, sslmode="require")
+            port = r.port or 5432
+            return dict(host=_force_ipv4(r.hostname, port), port=port,
+                        dbname=r.path.lstrip("/"), user=r.username,
+                        password=r.password, sslmode="require")
         raise RuntimeError("No se encontraron credenciales de base de datos.")
 
 
