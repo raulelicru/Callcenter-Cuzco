@@ -59,7 +59,26 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
         df = X.copy()
 
-        # Promesas: ratio cumplimiento (evita división por cero)
+        # Rellenar columnas opcionales que pueden no venir en el Excel del usuario
+        if "promesas_totales" not in df.columns:
+            df["promesas_totales"] = (
+                df.get("promesas_cumplidas", pd.Series(0, index=df.index)).fillna(0) +
+                df.get("promesas_rotas",     pd.Series(0, index=df.index)).fillna(0)
+            )
+        if "promesas_cumplidas" not in df.columns:
+            df["promesas_cumplidas"] = 0
+        if "promesas_rotas" not in df.columns:
+            df["promesas_rotas"] = 0
+        if "total_llamadas" not in df.columns:
+            df["total_llamadas"] = 0
+        if "contactos_efectivos" not in df.columns:
+            df["contactos_efectivos"] = 0
+        if "dias_ultimo_contacto" not in df.columns:
+            df["dias_ultimo_contacto"] = 30
+        if "ultimo_estado_marcado" not in df.columns:
+            df["ultimo_estado_marcado"] = "NO_CONTESTA"
+
+        # Promesas: ratio cumplimiento (evita division por cero)
         df["ratio_cumplimiento"] = np.where(
             df["promesas_totales"] > 0,
             df["promesas_cumplidas"] / df["promesas_totales"],
@@ -73,13 +92,13 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
             0.0,
         )
 
-        # Bandera: última gestión fue promesa de pago
+        # Bandera: ultima gestion fue promesa de pago
         df["flag_ultima_promesa"] = (df["ultimo_estado_marcado"] == "RPC_PROMESA").astype(int)
 
-        # Bandera: cliente contactado en últimos 7 días
+        # Bandera: cliente contactado en ultimos 7 dias
         df["flag_contacto_reciente"] = (df["dias_ultimo_contacto"] <= 7).astype(int)
 
-        # Severidad de mora (normalizada 0-1 sobre rango 0-180 días)
+        # Severidad de mora (normalizada 0-1 sobre rango 0-180 dias)
         df["severidad_mora"] = np.clip(df["dpd"] / 180, 0, 1)
 
         return df
