@@ -45,14 +45,30 @@ def get_db_params() -> dict:
 
 def get_connection():
     params = get_db_params()
+    errors = []
+    # Intento 1: con los parámetros tal como están (host ya resuelto a IPv4 si es posible)
     try:
         return psycopg.connect(**params, row_factory=dict_row, connect_timeout=15)
     except Exception as e:
-        msg = str(e).replace(params.get("password", ""), "***")
-        raise RuntimeError(
-            f"DB_CONNECT_ERROR | host={params.get('host','?')} port={params.get('port','?')} "
-            f"user={params.get('user','?')} dbname={params.get('dbname','?')} | {msg}"
-        ) from None
+        errors.append(f"intento1({params.get('host','?')}): {e}")
+
+    # Intento 2: host original sin resolver (por si el IPv4 era del pooler incorrecto)
+    try:
+        import streamlit as st
+        s = st.secrets["database"]
+        params2 = dict(host=s["host"], port=int(s["port"]), dbname=s["dbname"],
+                       user=s["user"], password=s["password"], sslmode="require")
+        if params2["host"] != params["host"]:
+            return psycopg.connect(**params2, row_factory=dict_row, connect_timeout=15)
+    except Exception as e:
+        errors.append(f"intento2(original): {e}")
+
+    pwd = params.get("password", "")
+    msgs = " | ".join(str(e).replace(pwd, "***") for e in errors)
+    raise RuntimeError(
+        f"DB_CONNECT_ERROR | host={params.get('host','?')} port={params.get('port','?')} "
+        f"user={params.get('user','?')} | {msgs}"
+    ) from None
 
 
 def _batch_execute(cur, sql_template: str, rows: list, page_size: int = 1000):
