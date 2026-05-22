@@ -854,7 +854,11 @@ def _bootstrap_users():
 
 
 def main():
-    init_db()
+    try:
+        init_db()
+    except RuntimeError as e:
+        st.error(f"**Error de conexion:** {e}")
+        st.stop()
     _bootstrap_users()
     if "user" not in st.session_state:
         show_login()

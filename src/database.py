@@ -31,12 +31,11 @@ def get_connection():
     params = get_db_params()
     try:
         return psycopg.connect(**params, row_factory=dict_row, connect_timeout=15)
-    except psycopg.OperationalError as e:
-        # Exponer el error real (sin credenciales) para diagnóstico
+    except Exception as e:
         msg = str(e).replace(params.get("password", ""), "***")
-        raise psycopg.OperationalError(
-            f"No se pudo conectar a Supabase ({params.get('host','?')}:{params.get('port','?')}). "
-            f"Detalle: {msg}"
+        raise RuntimeError(
+            f"DB_CONNECT_ERROR | host={params.get('host','?')} port={params.get('port','?')} "
+            f"user={params.get('user','?')} dbname={params.get('dbname','?')} | {msg}"
         ) from None
 
 
