@@ -134,34 +134,34 @@ COLORES = {"ALTO": "#27ae60", "MEDIO": "#f39c12", "BAJO": "#e74c3c"}
 # ── Estrategias ───────────────────────────────────────────────────────────────
 ESTRATEGIAS = {
     "ALTO": {
-        "canal":      "WhatsApp Business / SMS / Email / IVR Autopago",
-        "accion":     "Recordatorio digital automatico con link de pago",
-        "oferta":     "2 cuotas sin interes adicional / Autopago inmediato",
-        "frecuencia": "Max. 2 contactos digitales por semana",
-        "escalacion": "Sin pago en 7 dias -> Escalar a MEDIO",
-        "script":     "Hola [Nombre], tienes un saldo de S/[monto]. Pagalo hoy aqui: [link]. Tu historial crediticio te lo agradecera.",
-        "kpis":       "Conversion >= 20% | Costo S/ 0.10-0.30 | ROI >= 400%",
-        "referencia": "Hoist Finance / Interbank Peru - Digital First Collection",
+        "canal":      "WhatsApp Business / SMS / Llamada IVR Autopago",
+        "accion":     "Mensaje WhatsApp/SMS automatizado con link de pago + IVR de recordatorio",
+        "oferta":     "Pago total con descuento / 2 cuotas sin interes / Autopago inmediato",
+        "frecuencia": "1 WhatsApp + 1 SMS por semana | Max. 1 llamada IVR semanal",
+        "escalacion": "Sin respuesta en 7 dias -> Pasar a gestion MEDIO con agente",
+        "script":     "WhatsApp: Hola [Nombre], te recordamos que tienes un saldo pendiente de S/[monto]. Regularizalo hoy y evita cargos adicionales. Paga aqui: [link]",
+        "kpis":       "Tasa de respuesta WhatsApp >= 25% | Conversion >= 20% | Costo S/ 0.20-0.50",
+        "referencia": "Estrategia Digital First — marcador predictivo en standby",
     },
     "MEDIO": {
-        "canal":      "Marcador Predictivo + Agente Humano (AMD activado)",
-        "accion":     "Negociacion activa con script ACED + registro de Promesa de Pago",
-        "oferta":     "Plan 3-6 cuotas / Condonacion intereses moratorios",
-        "frecuencia": "Max. 3 intentos/dia | Mejor hora: 9-11am y 6-8pm L-V",
-        "escalacion": "2 PTPs rotas -> Escalar a BAJO",
-        "script":     "ACED: Acknowledge -> Create urgency -> Empathize -> Deal. Oferta: Puedo condonar los intereses si paga el capital hoy.",
-        "kpis":       "RPC >= 45% | PTP >= 30% | Kept PTP >= 65% | Costo S/ 2-3.50",
-        "referencia": "FICO TRIAD / COFACE / Encore Capital - Human-Assisted Negotiation",
+        "canal":      "Marcador Predictivo + Agente Humano (AMD activado) + WhatsApp de seguimiento",
+        "accion":     "Llamada outbound de negociacion activa + WhatsApp post-llamada con resumen de acuerdo",
+        "oferta":     "Plan 3-6 cuotas / Condonacion de intereses moratorios / Refinanciamiento",
+        "frecuencia": "Max. 3 llamadas/dia | Mejor hora: 9-11am y 6-8pm L-V | WhatsApp de seguimiento mismo dia",
+        "escalacion": "2 Promesas de Pago rotas -> Escalar a gestion BAJO intensiva",
+        "script":     "Buenos dias [Nombre], le llamo del Call Center Cuzco por su cuenta. Entiendo que puede tener dificultades, por eso le ofrezco regularizar en [N] cuotas. ¿Le parece bien comenzar hoy?",
+        "kpis":       "RPC >= 45% | PTP >= 30% | Promesas cumplidas >= 65% | Costo S/ 2.00-3.50",
+        "referencia": "Script ACED: Acknowledge + Create urgency + Empathize + Deal",
     },
     "BAJO": {
-        "canal":      "Especialista Senior / Notaria / Agencia Externa / Pre-Legal",
-        "accion":     "Skip Tracing + Carta Notarial + Oferta Settlement",
-        "oferta":     "Score 20-33: Skip tracing | Score 10-19: Quita 20-40% | Score 1-9: Pre-legal",
-        "frecuencia": "Gestion semanal especializada",
-        "escalacion": "DPD > 180 -> Evaluar venta de cartera (5-15 ctvs/sol)",
-        "script":     "Notificamos que de no regularizar su deuda de S/[monto] en 15 dias habiles, iniciaremos proceso judicial y registro en centrales de riesgo SBS/Equifax.",
-        "kpis":       "Skip tracing >= 25% | Settlement >= 15% | Recovery >= 8%",
-        "referencia": "Intrum / Portfolio Recovery Associates - Intensive & Legal",
+        "canal":      "Agente Senior Especializado / Llamada Directa / SMS y WhatsApp de presion",
+        "accion":     "Llamada directa de agente senior + SMS/WhatsApp con aviso formal de mora + oferta de settlement",
+        "oferta":     "Score 22-33: Refinanciamiento largo plazo | Score 11-21: Quita 20-40% del saldo | Score 1-10: Settlement minimo + cierre de cuenta",
+        "frecuencia": "1 llamada diaria de agente senior | SMS/WhatsApp de seguimiento a las 2 horas post-llamada",
+        "escalacion": "DPD > 180 y sin acuerdo -> Notificacion formal por llamada + SMS de pre-corte",
+        "script":     "Sr./Sra. [Nombre], le llama [Agente] del area de Recuperaciones del Call Center Cuzco. Su cuenta tiene [DPD] dias de mora por S/[monto]. Tenemos una oferta especial de settlement disponible solo por hoy. ¿Puede atendernos?",
+        "kpis":       "Contacto efectivo >= 30% | Settlement >= 15% | Recuperacion >= 8% del saldo",
+        "referencia": "Gestion intensiva telefonica — sin derivacion externa",
     },
 }
 
@@ -756,11 +756,12 @@ def page_estrategias():
     st.divider()
     st.markdown("#### Comparacion Rapida")
     comp = pd.DataFrame([
-        {"Metrica": "Costo por contacto",     "ALTO": "S/ 0.10-0.30",   "MEDIO": "S/ 2.00-3.50",   "BAJO": "S/ 10-25"},
-        {"Metrica": "Conversion objetivo",    "ALTO": ">= 20%",         "MEDIO": "PTP >= 30%",     "BAJO": "Settlement >= 15%"},
-        {"Metrica": "Canal principal",        "ALTO": "WhatsApp / SMS", "MEDIO": "Marcador+Agente","BAJO": "Especialista/Legal"},
-        {"Metrica": "Frecuencia maxima",      "ALTO": "2/semana",       "MEDIO": "3/dia",          "BAJO": "1/semana"},
-        {"Metrica": "ROI estimado",           "ALTO": "400-600%",       "MEDIO": "150-300%",       "BAJO": "50-150%"},
+        {"Metrica": "Canal",               "ALTO": "WhatsApp / SMS / IVR",     "MEDIO": "Marcador Predictivo + Agente", "BAJO": "Agente Senior + SMS/WhatsApp"},
+        {"Metrica": "Costo por contacto",  "ALTO": "S/ 0.20-0.50",             "MEDIO": "S/ 2.00-3.50",                "BAJO": "S/ 5.00-10.00"},
+        {"Metrica": "Frecuencia maxima",   "ALTO": "1 WA + 1 SMS / semana",    "MEDIO": "3 llamadas / dia",            "BAJO": "1 llamada diaria + SMS"},
+        {"Metrica": "Conversion objetivo", "ALTO": "Respuesta WA >= 25%",      "MEDIO": "PTP >= 30%",                  "BAJO": "Settlement >= 15%"},
+        {"Metrica": "Mejor horario",       "ALTO": "8am-10pm (WA/SMS)",        "MEDIO": "9-11am y 6-8pm L-V",         "BAJO": "9am-6pm L-V"},
+        {"Metrica": "ROI estimado",        "ALTO": "400-600%",                  "MEDIO": "150-300%",                    "BAJO": "50-150%"},
     ])
     st.dataframe(comp, hide_index=True, use_container_width=True)
 
