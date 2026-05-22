@@ -1,5 +1,5 @@
 data/
-models/
+# models/ — incluido en repo para Streamlit Cloud
 __pycache__/
 *.pyc
 *.pyo
@@ -8,3 +8,4 @@ __pycache__/
 dist/
 build/
 .DS_Store
+.streamlit/secrets.toml
