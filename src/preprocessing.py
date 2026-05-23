@@ -59,47 +59,63 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
         df = X.copy()
 
-        # Rellenar columnas opcionales que pueden no venir en el Excel del usuario
-        if "promesas_totales" not in df.columns:
-            df["promesas_totales"] = (
-                df.get("promesas_cumplidas", pd.Series(0, index=df.index)).fillna(0) +
-                df.get("promesas_rotas",     pd.Series(0, index=df.index)).fillna(0)
+        # Rellenar TODAS las columnas opcionales con valores neutros
+        defaults_num = {
+            "dpd":                 0,
+            "saldo_capital":       df.get("saldo_total", pd.Series(0, index=df.index)),
+            "saldo_total":         0,
+            "num_cuotas_vencidas": 0,
+            "rpc_rate":            0.0,
+            "total_llamadas":      0,
+            "contactos_efectivos": 0,
+            "promesas_cumplidas":  0,
+            "promesas_rotas":      0,
+            "dias_ultimo_contacto":30,
+            "edad":                40,
+            "ingreso_mensual":     1000,
+            "ratio_deuda_ingreso": 0.5,
+            "promesas_totales":    0,
+        }
+        defaults_cat = {
+            "bucket_mora":          "B1",
+            "producto":             "CREDITO",
+            "ultimo_estado_marcado":"NO_CONTESTA",
+            "genero":               "F",
+            "nivel_educativo":      "SECUNDARIA",
+            "estado_laboral":       "DEPENDIENTE",
+            "zona_geografica":      "LIMA",
+        }
+        for col, default in defaults_num.items():
+            if col not in df.columns:
+                df[col] = default if not hasattr(default, "values") else default.values
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(
+                default if not hasattr(default, "values") else 0
             )
-        if "promesas_cumplidas" not in df.columns:
-            df["promesas_cumplidas"] = 0
-        if "promesas_rotas" not in df.columns:
-            df["promesas_rotas"] = 0
-        if "total_llamadas" not in df.columns:
-            df["total_llamadas"] = 0
-        if "contactos_efectivos" not in df.columns:
-            df["contactos_efectivos"] = 0
-        if "dias_ultimo_contacto" not in df.columns:
-            df["dias_ultimo_contacto"] = 30
-        if "ultimo_estado_marcado" not in df.columns:
-            df["ultimo_estado_marcado"] = "NO_CONTESTA"
+        for col, default in defaults_cat.items():
+            if col not in df.columns:
+                df[col] = default
+            df[col] = df[col].fillna(default).astype(str)
 
-        # Promesas: ratio cumplimiento (evita division por cero)
+        # promesas_totales = cumplidas + rotas si no vino en el archivo
+        zero_mask = df["promesas_totales"] == 0
+        df.loc[zero_mask, "promesas_totales"] = (
+            df.loc[zero_mask, "promesas_cumplidas"] + df.loc[zero_mask, "promesas_rotas"]
+        )
+
+        # Features derivados
         df["ratio_cumplimiento"] = np.where(
             df["promesas_totales"] > 0,
             df["promesas_cumplidas"] / df["promesas_totales"],
             0.0,
         )
-
-        # Intensidad de contacto normalizada
         df["contacto_por_llamada"] = np.where(
             df["total_llamadas"] > 0,
             df["contactos_efectivos"] / df["total_llamadas"],
             0.0,
         )
-
-        # Bandera: ultima gestion fue promesa de pago
-        df["flag_ultima_promesa"] = (df["ultimo_estado_marcado"] == "RPC_PROMESA").astype(int)
-
-        # Bandera: cliente contactado en ultimos 7 dias
-        df["flag_contacto_reciente"] = (df["dias_ultimo_contacto"] <= 7).astype(int)
-
-        # Severidad de mora (normalizada 0-1 sobre rango 0-180 dias)
-        df["severidad_mora"] = np.clip(df["dpd"] / 180, 0, 1)
+        df["flag_ultima_promesa"]   = (df["ultimo_estado_marcado"] == "RPC_PROMESA").astype(int)
+        df["flag_contacto_reciente"]= (df["dias_ultimo_contacto"] <= 7).astype(int)
+        df["severidad_mora"]        = np.clip(df["dpd"] / 180, 0, 1)
 
         return df
 
