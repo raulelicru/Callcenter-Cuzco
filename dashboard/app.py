@@ -524,8 +524,8 @@ def page_cargar():
 
     uploaded = st.file_uploader(
         "Selecciona el archivo de cartera",
-        type=["xlsx", "xls", "csv", "txt"],
-        help="Acepta Excel (.xlsx, .xls), CSV y TXT (separado por tabulador, punto y coma o coma)",
+        type=["xlsx", "xls", "csv", "txt", "docx"],
+        help="Acepta Excel, CSV, TXT y Google Docs / Word (.docx). El .docx debe tener los datos en una tabla.",
     )
 
     if uploaded is None:
@@ -556,35 +556,7 @@ def page_cargar():
         return
 
     try:
-        name = uploaded.name.lower()
-        if name.endswith((".xlsx", ".xls")):
-            df_raw = pd.read_excel(uploaded)
-        elif name.endswith(".txt"):
-            for enc in ["utf-8", "latin-1", "cp1252"]:
-                for sep in ["\t", ";", ",", "|"]:
-                    try:
-                        df_raw = pd.read_csv(uploaded, sep=sep, encoding=enc, low_memory=False)
-                        if len(df_raw.columns) > 1:
-                            break
-                        uploaded.seek(0)
-                    except Exception:
-                        uploaded.seek(0)
-                else:
-                    continue
-                break
-        else:
-            for enc in ["utf-8", "latin-1", "cp1252"]:
-                for sep in [",", ";", "\t", "|"]:
-                    try:
-                        df_raw = pd.read_csv(uploaded, sep=sep, encoding=enc, low_memory=False)
-                        if len(df_raw.columns) > 1:
-                            break
-                        uploaded.seek(0)
-                    except Exception:
-                        uploaded.seek(0)
-                else:
-                    continue
-                break
+        df_raw = _read_any_file(uploaded)
     except Exception as e:
         st.error(f"Error al leer el archivo: {e}")
         return
@@ -973,10 +945,43 @@ def _vic_detect_cols(df: pd.DataFrame) -> dict:
     }
 
 
-def _vic_load(uploaded) -> pd.DataFrame:
+def _read_any_file(uploaded) -> pd.DataFrame:
+    """Lee CSV, Excel, TXT o DOCX y devuelve un DataFrame."""
     name = uploaded.name.lower()
+
     if name.endswith((".xlsx", ".xls")):
         return pd.read_excel(uploaded)
+
+    if name.endswith(".docx"):
+        from docx import Document
+        doc = Document(uploaded)
+        # Buscar tablas dentro del documento
+        if doc.tables:
+            tbl = doc.tables[0]
+            headers = [cell.text.strip() for cell in tbl.rows[0].cells]
+            data = []
+            for row in tbl.rows[1:]:
+                data.append([cell.text.strip() for cell in row.cells])
+            df = pd.DataFrame(data, columns=headers)
+            # Limpiar columnas vacías
+            df = df.loc[:, df.columns.str.strip() != ""]
+            df = df[df.apply(lambda r: r.str.strip().ne("").any(), axis=1)]
+            return df
+        # Si no hay tablas, intentar extraer texto como CSV/TSV
+        lines = [p.text for p in doc.paragraphs if p.text.strip()]
+        if lines:
+            from io import StringIO
+            text = "\n".join(lines)
+            for sep in ["\t", ";", ",", "|"]:
+                try:
+                    df = pd.read_csv(StringIO(text), sep=sep)
+                    if len(df.columns) > 1:
+                        return df
+                except Exception:
+                    pass
+        raise ValueError("No se encontraron tablas ni datos estructurados en el documento.")
+
+    # CSV y TXT: detectar separador y encoding automáticamente
     for enc in ["utf-8", "latin-1", "cp1252"]:
         for sep in [",", ";", "\t", "|"]:
             try:
@@ -987,6 +992,10 @@ def _vic_load(uploaded) -> pd.DataFrame:
             except Exception:
                 uploaded.seek(0)
     return pd.read_csv(uploaded, encoding="latin-1", low_memory=False)
+
+
+def _vic_load(uploaded) -> pd.DataFrame:
+    return _read_any_file(uploaded)
 
 
 def _vic_fmt(seconds) -> str:
@@ -1064,9 +1073,9 @@ def page_vicidial():
     st.divider()
 
     uploaded = st.file_uploader(
-        "Archivo de llamadas Vicidial (CSV, Excel, TXT)",
-        type=["csv","xlsx","xls","txt"],
-        help="Exporta desde Vicidial Admin → Reports → Call Report",
+        "Archivo de llamadas Vicidial (CSV, Excel, TXT, Google Docs)",
+        type=["csv","xlsx","xls","txt","docx"],
+        help="Exporta desde Vicidial Admin → Reports → Call Report. También acepta Google Docs (.docx) con tabla de datos.",
     )
 
     if uploaded is None:
