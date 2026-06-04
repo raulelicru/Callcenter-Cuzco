@@ -126,15 +126,60 @@ def get_cargas_historico() -> pd.DataFrame:
 
 def get_metricas_globales() -> dict:
     client = get_client()
-    resp = client.rpc("get_metricas_globales").execute()
-    data = resp.data or {}
+
+    # Intentar con la función RPC; si falla, calcular directamente desde la tabla
+    try:
+        resp = client.rpc("get_metricas_globales").execute()
+        data = resp.data or {}
+        if data:
+            return {
+                "total_clientes": data.get("total_clientes", 0),
+                "por_segmento":   data.get("por_segmento", {}),
+                "avg_score":      float(data.get("avg_score", 0)),
+                "avg_prob_pago":  float(data.get("avg_prob_pago", 0)),
+                "saldo_total":    float(data.get("saldo_total", 0)),
+                "total_cargas":   data.get("total_cargas", 0),
+            }
+    except Exception:
+        pass
+
+    # Fallback: calcular desde la tabla clientes directamente
+    resp = client.table("clientes").select(
+        "segmento, score_operativo, prob_pago, saldo_total"
+    ).execute()
+    rows = resp.data or []
+
+    if not rows:
+        return {
+            "total_clientes": 0,
+            "por_segmento":   {},
+            "avg_score":      0.0,
+            "avg_prob_pago":  0.0,
+            "saldo_total":    0.0,
+            "total_cargas":   0,
+        }
+
+    df = pd.DataFrame(rows)
+    por_segmento = {}
+    for seg, grp in df.groupby("segmento"):
+        por_segmento[seg] = {
+            "count": len(grp),
+            "saldo": float(grp["saldo_total"].fillna(0).sum()),
+            "avg_score": float(grp["score_operativo"].fillna(0).mean()),
+        }
+
+    try:
+        n_cargas = client.table("cargas").select("id", count="exact").execute().count or 0
+    except Exception:
+        n_cargas = 0
+
     return {
-        "total_clientes": data.get("total_clientes", 0),
-        "por_segmento":   data.get("por_segmento", {}),
-        "avg_score":      float(data.get("avg_score", 0)),
-        "avg_prob_pago":  float(data.get("avg_prob_pago", 0)),
-        "saldo_total":    float(data.get("saldo_total", 0)),
-        "total_cargas":   data.get("total_cargas", 0),
+        "total_clientes": len(df),
+        "por_segmento":   por_segmento,
+        "avg_score":      round(float(df["score_operativo"].fillna(0).mean()), 1),
+        "avg_prob_pago":  round(float(df["prob_pago"].fillna(0).mean()), 3),
+        "saldo_total":    float(df["saldo_total"].fillna(0).sum()),
+        "total_cargas":   n_cargas,
     }
 
 
