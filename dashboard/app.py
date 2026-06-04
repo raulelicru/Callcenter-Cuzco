@@ -524,8 +524,8 @@ def page_cargar():
 
     uploaded = st.file_uploader(
         "Selecciona el archivo de cartera",
-        type=["xlsx", "xls", "csv"],
-        help="Acepta Excel (.xlsx, .xls) y CSV",
+        type=["xlsx", "xls", "csv", "txt"],
+        help="Acepta Excel (.xlsx, .xls), CSV y TXT (separado por tabulador, punto y coma o coma)",
     )
 
     if uploaded is None:
@@ -557,7 +557,34 @@ def page_cargar():
 
     try:
         name = uploaded.name.lower()
-        df_raw = pd.read_csv(uploaded) if name.endswith(".csv") else pd.read_excel(uploaded)
+        if name.endswith((".xlsx", ".xls")):
+            df_raw = pd.read_excel(uploaded)
+        elif name.endswith(".txt"):
+            for enc in ["utf-8", "latin-1", "cp1252"]:
+                for sep in ["\t", ";", ",", "|"]:
+                    try:
+                        df_raw = pd.read_csv(uploaded, sep=sep, encoding=enc, low_memory=False)
+                        if len(df_raw.columns) > 1:
+                            break
+                        uploaded.seek(0)
+                    except Exception:
+                        uploaded.seek(0)
+                else:
+                    continue
+                break
+        else:
+            for enc in ["utf-8", "latin-1", "cp1252"]:
+                for sep in [",", ";", "\t", "|"]:
+                    try:
+                        df_raw = pd.read_csv(uploaded, sep=sep, encoding=enc, low_memory=False)
+                        if len(df_raw.columns) > 1:
+                            break
+                        uploaded.seek(0)
+                    except Exception:
+                        uploaded.seek(0)
+                else:
+                    continue
+                break
     except Exception as e:
         st.error(f"Error al leer el archivo: {e}")
         return
