@@ -15,6 +15,19 @@ import joblib, io
 from pathlib import Path
 from datetime import datetime
 
+# ── Constantes Vicidial ───────────────────────────────────────────────────────
+_VIC_CONTACT  = {"SALE", "CALLBK", "DEC", "NI", "XFER", "INCALL", "CLOSER"}
+_VIC_POSITIVE = {"SALE", "CALLBK", "XFER"}
+_VIC_MACHINE  = {"AA", "AM", "LAMA"}
+_VIC_NOANSWER = {"N", "NA", "NNA", "B", "BUSY", "DC", "DROP", "QUEUETIMEOUT"}
+_VIC_STATUS_LABELS = {
+    "SALE":"Venta","CALLBK":"Callback","DEC":"Rechazo","NI":"No interesado",
+    "XFER":"Transferido","N":"No contesta","NA":"No contesta","NNA":"No contesta",
+    "AA":"Contestador","AM":"Contestador","B":"Ocupado","BUSY":"Ocupado",
+    "DC":"Desconectado","DROP":"Caida","LAMA":"Limit.contestador",
+    "QUEUETIMEOUT":"Timeout cola","INCALL":"En llamada","DNCL":"No llamar",
+}
+
 from database import (
     init_db, get_clientes_by_ids, upsert_clientes_batch,
     log_carga, get_cargas_historico, get_metricas_globales, get_all_clientes_df,
@@ -377,6 +390,7 @@ def show_sidebar():
             "analisis":    "  Analisis",
             "historial":   "  Historial",
             "estrategias": "  Estrategias",
+            "vicidial":    "  Reporte Vicidial",
         }
         if user["rol"] == "admin":
             pages["admin"] = "  Panel Admin"
@@ -913,6 +927,366 @@ def page_admin():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PAGINA: REPORTE VICIDIAL
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _vic_detect_cols(df: pd.DataFrame) -> dict:
+    c = {col.lower().strip(): col for col in df.columns}
+    def find(*names):
+        for n in names:
+            if n in c:
+                return c[n]
+        return None
+    return {
+        "date":     find("call_date","fecha","date","start_time","calldate","call_time"),
+        "agent":    find("user","agent","agente","operator","username","agent_user"),
+        "status":   find("status","estado","disposition","call_status","result"),
+        "duration": find("length_in_sec","duration","duracion","call_duration","seconds","length","talk_time"),
+        "campaign": find("campaign_id","campaign","campana","lista","list_id"),
+    }
+
+
+def _vic_load(uploaded) -> pd.DataFrame:
+    name = uploaded.name.lower()
+    if name.endswith((".xlsx", ".xls")):
+        return pd.read_excel(uploaded)
+    for enc in ["utf-8", "latin-1", "cp1252"]:
+        for sep in [",", ";", "\t", "|"]:
+            try:
+                df = pd.read_csv(uploaded, encoding=enc, sep=sep, low_memory=False)
+                if len(df.columns) > 1:
+                    return df
+                uploaded.seek(0)
+            except Exception:
+                uploaded.seek(0)
+    return pd.read_csv(uploaded, encoding="latin-1", low_memory=False)
+
+
+def _vic_fmt(seconds) -> str:
+    if seconds is None or (isinstance(seconds, float) and np.isnan(seconds)):
+        return "–"
+    m, s = divmod(int(seconds), 60)
+    return f"{m}m {s:02d}s"
+
+
+def _vic_pct(num, den) -> str:
+    return "0%" if den == 0 else f"{num/den*100:.1f}%"
+
+
+def _vic_kpi(col, label, value, delta="", color="#3b82f6"):
+    with col:
+        st.markdown(f"""
+        <div style="background:#1e2535;border-radius:10px;padding:16px 18px;
+                    border-left:4px solid {color};margin-bottom:8px">
+          <div style="color:#8899aa;font-size:12px;text-transform:uppercase">{label}</div>
+          <div style="color:#fff;font-size:26px;font-weight:700">{value}</div>
+          <div style="color:#6b7a99;font-size:12px;margin-top:2px">{delta}</div>
+        </div>""", unsafe_allow_html=True)
+
+
+def _vic_alert(title, body, color="#dc2626"):
+    st.markdown(f"""
+    <div style="background:#1c1917;border:1px solid {color};border-radius:10px;
+                padding:14px 18px;margin-bottom:8px">
+      <div style="color:{color};font-weight:700;font-size:14px">⚠ {title}</div>
+      <div style="color:#d1d5db;font-size:13px;margin-top:4px">{body}</div>
+    </div>""", unsafe_allow_html=True)
+
+
+def _vic_critical(total, contacted, machines, no_answer, avg_dur, agent_df):
+    points = []
+    cr = contacted / total if total else 0
+    if cr < 0.20:
+        points.append(("rojo", "Tasa de contacto CRÍTICA",
+            f"Solo {cr*100:.1f}% de llamadas contactan (meta mínima 20%). "
+            "Revisar base, horarios y estrategia de marcado."))
+    elif cr < 0.35:
+        points.append(("naranja", "Tasa de contacto por debajo del objetivo",
+            f"{cr*100:.1f}% de contacto. Optimizar franjas horarias y depurar números inválidos."))
+
+    mr = machines / total if total else 0
+    if mr > 0.30:
+        points.append(("naranja", "Alto porcentaje de contestadores automáticos",
+            f"{mr*100:.1f}% caen en contestador/AM. Activar AMD o ajustar horarios."))
+
+    if avg_dur is not None:
+        if avg_dur < 30:
+            points.append(("rojo", "Duración promedio muy corta",
+                f"Promedio {avg_dur:.0f}s indica llamadas incompletas o desconexiones. "
+                "Verificar conectividad y scripts de apertura."))
+        elif avg_dur > 600:
+            points.append(("naranja", "Llamadas con duración excesiva",
+                f"Promedio {avg_dur/60:.1f} min. Revisar manejo de objeciones y scripts."))
+
+    if agent_df is not None and "tasa_contacto" in agent_df.columns and len(agent_df) > 1:
+        low = agent_df[agent_df["tasa_contacto"] < 15]
+        if len(low) > 0:
+            names = ", ".join(low.index.astype(str)[:5])
+            points.append(("naranja", "Agentes con tasa de contacto < 15%",
+                f"{names}. Requieren coaching o revisión de su base asignada."))
+
+    if not points:
+        points.append(("verde", "Sin alertas críticas detectadas",
+            "El reporte no muestra problemas graves. Monitorear tendencias para mejora continua."))
+    return points
+
+
+def page_vicidial():
+    st.markdown("## 📞 Reporte de Eficiencia — Vicidial")
+    st.markdown("*Sube tu archivo de llamadas y obtén el análisis en segundos.*")
+    st.divider()
+
+    uploaded = st.file_uploader(
+        "Archivo de llamadas Vicidial (CSV, Excel, TXT)",
+        type=["csv","xlsx","xls","txt"],
+        help="Exporta desde Vicidial Admin → Reports → Call Report",
+    )
+
+    if uploaded is None:
+        with st.expander("¿Qué columnas necesita el archivo?"):
+            st.markdown("""
+| Columna | Descripción | Nombres reconocidos |
+|---------|-------------|---------------------|
+| Fecha | Momento de la llamada | `call_date`, `fecha`, `start_time` |
+| Agente | Usuario que marcó | `user`, `agent`, `agente` |
+| Estado | Resultado | `status`, `disposition`, `estado` |
+| Duración | Segundos | `length_in_sec`, `duration`, `duracion` |
+| Campaña | ID campaña | `campaign_id`, `campaign` |
+            """)
+        return
+
+    with st.spinner("Analizando..."):
+        try:
+            df = _vic_load(uploaded)
+        except Exception as e:
+            st.error(f"Error al leer el archivo: {e}")
+            return
+
+    if df is None or len(df) == 0:
+        st.error("El archivo está vacío.")
+        return
+
+    cols = _vic_detect_cols(df)
+    total = len(df)
+
+    # Preprocesar
+    if cols["status"]:
+        df["_st"] = df[cols["status"]].astype(str).str.upper().str.strip()
+        contacted = df["_st"].isin(_VIC_CONTACT).sum()
+        positives = df["_st"].isin(_VIC_POSITIVE).sum()
+        machines  = df["_st"].isin(_VIC_MACHINE).sum()
+        no_answer = df["_st"].isin(_VIC_NOANSWER).sum()
+    else:
+        contacted = positives = machines = no_answer = 0
+
+    if cols["duration"]:
+        df["_dur"] = pd.to_numeric(df[cols["duration"]], errors="coerce").fillna(0)
+        avg_dur   = df["_dur"].mean()
+        total_min = df["_dur"].sum() / 60
+    else:
+        avg_dur = total_min = None
+
+    if cols["date"]:
+        df["_dt"] = pd.to_datetime(df[cols["date"]], errors="coerce")
+        df["_hour"] = df["_dt"].dt.hour
+
+    # ── KPIs ──────────────────────────────────────────────────────────────────
+    st.markdown("#### Resumen General")
+    k1, k2, k3, k4, k5 = st.columns(5)
+    _vic_kpi(k1, "Total llamadas", f"{total:,}")
+    cr_color = "#27ae60" if contacted/total >= 0.35 else "#f39c12" if contacted/total >= 0.20 else "#e74c3c"
+    _vic_kpi(k2, "Tasa de contacto", _vic_pct(contacted, total), color=cr_color)
+    pr_color = "#27ae60" if positives/total >= 0.15 else "#f39c12" if positives/total >= 0.08 else "#e74c3c"
+    _vic_kpi(k3, "Tasa positiva", _vic_pct(positives, total), color=pr_color)
+    dur_color = "#27ae60" if avg_dur and 60 <= avg_dur <= 300 else "#f39c12"
+    _vic_kpi(k4, "Duración promedio", _vic_fmt(avg_dur), color=dur_color)
+    _vic_kpi(k5, "Minutos totales", f"{total_min:,.0f}" if total_min else "–")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Puntos críticos ────────────────────────────────────────────────────────
+    st.markdown("#### Puntos Críticos")
+    agent_df_for_alerts = None
+
+    if cols["agent"] and cols["status"]:
+        ag_total = df.groupby(cols["agent"]).size().rename("total")
+        ag_cont  = df[df["_st"].isin(_VIC_CONTACT)].groupby(cols["agent"]).size().rename("contactadas")
+        adf_tmp  = pd.concat([ag_total, ag_cont], axis=1).fillna(0)
+        adf_tmp["tasa_contacto"] = (adf_tmp["contactadas"] / adf_tmp["total"] * 100).round(1)
+        agent_df_for_alerts = adf_tmp
+
+    points = _vic_critical(total, contacted, machines, no_answer, avg_dur, agent_df_for_alerts)
+    color_map = {"rojo": "#dc2626", "naranja": "#f59e0b", "verde": "#22c55e"}
+    for severity, title, body in points:
+        if severity == "verde":
+            st.success(f"✅ **{title}** — {body}")
+        else:
+            _vic_alert(title, body, color_map[severity])
+
+    # ── Gráficos ──────────────────────────────────────────────────────────────
+    st.markdown("#### Análisis Visual")
+    chart_cfg = dict(paper_bgcolor="#1e2535", plot_bgcolor="#1e2535",
+                     font=dict(color="#aaa", size=12), margin=dict(t=36, b=20, l=10, r=10))
+
+    tab1, tab2, tab3, tab4 = st.tabs(["Distribución", "Por Hora", "Por Agente", "Tendencia Diaria"])
+
+    with tab1:
+        c_a, c_b = st.columns(2)
+        with c_a:
+            if cols["status"]:
+                sc = df["_st"].value_counts().head(12).reset_index()
+                sc.columns = ["Status", "Llamadas"]
+                sc["Label"] = sc["Status"].map(_VIC_STATUS_LABELS).fillna(sc["Status"])
+                fig = px.pie(sc, values="Llamadas", names="Label", title="Distribución por Estado",
+                             hole=0.4, color_discrete_sequence=px.colors.qualitative.Set3)
+                fig.update_layout(**chart_cfg, height=340)
+                st.plotly_chart(fig, use_container_width=True)
+        with c_b:
+            if cols["status"]:
+                cats = {"Contacto efectivo": contacted, "No contesta": int(no_answer),
+                        "Contestador AM": int(machines),
+                        "Otros": max(0, total - contacted - int(no_answer) - int(machines))}
+                fig2 = px.bar(x=list(cats.keys()), y=list(cats.values()),
+                              title="Resultado de Llamadas",
+                              color=list(cats.keys()),
+                              color_discrete_map={"Contacto efectivo":"#22c55e","No contesta":"#ef4444",
+                                                  "Contestador AM":"#f59e0b","Otros":"#6b7280"})
+                fig2.update_layout(**chart_cfg, height=340, showlegend=False)
+                st.plotly_chart(fig2, use_container_width=True)
+        if cols["duration"]:
+            dur_data = df["_dur"][df["_dur"].between(1, 3600)]
+            fig3 = px.histogram(dur_data, nbins=50, title="Distribución de Duración (seg)",
+                                color_discrete_sequence=["#3b82f6"])
+            fig3.add_vline(x=dur_data.mean(), line_dash="dash", line_color="#f59e0b",
+                           annotation_text=f"Prom: {dur_data.mean():.0f}s")
+            fig3.update_layout(**chart_cfg)
+            st.plotly_chart(fig3, use_container_width=True)
+
+    with tab2:
+        if cols["date"] and "_hour" in df.columns:
+            hc = df.groupby("_hour").size().reindex(range(24), fill_value=0)
+            fig_h = go.Figure()
+            fig_h.add_trace(go.Bar(x=hc.index, y=hc.values, name="Total llamadas",
+                                   marker_color="#3b82f6", opacity=0.7))
+            if cols["status"]:
+                hcon = df[df["_st"].isin(_VIC_CONTACT)].groupby("_hour").size().reindex(range(24), fill_value=0)
+                fig_h.add_trace(go.Scatter(x=hcon.index, y=hcon.values, name="Contactos",
+                                           line=dict(color="#22c55e", width=2), mode="lines+markers"))
+                best = hcon.idxmax()
+                st.info(f"Mejor hora para contactar: **{best}:00 – {best+1}:00** ({hcon[best]:,} contactos)")
+            fig_h.update_layout(**chart_cfg, title="Llamadas por Hora del Día",
+                                xaxis=dict(title="Hora", tickmode="linear", tick0=0, dtick=1),
+                                yaxis=dict(title="Llamadas"),
+                                legend=dict(x=0, y=1.1, orientation="h"))
+            st.plotly_chart(fig_h, use_container_width=True)
+
+            dow_order = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+            dow_es    = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"]
+            dow = df.groupby(df["_dt"].dt.day_name()).size().reindex(
+                [d for d in dow_order if d in df["_dt"].dt.day_name().values], fill_value=0)
+            dow.index = [dow_es[dow_order.index(d)] for d in dow.index]
+            fig_d = px.bar(x=dow.index, y=dow.values, title="Llamadas por Día de Semana",
+                           color_discrete_sequence=["#8b5cf6"])
+            fig_d.update_layout(**chart_cfg)
+            st.plotly_chart(fig_d, use_container_width=True)
+        else:
+            st.info("No se detectó columna de fecha.")
+
+    with tab3:
+        if cols["agent"]:
+            ag_total = df.groupby(cols["agent"]).size().rename("total")
+            res = {"total": ag_total}
+            if cols["status"]:
+                res["contactadas"] = df[df["_st"].isin(_VIC_CONTACT)].groupby(cols["agent"]).size()
+                res["positivas"]   = df[df["_st"].isin(_VIC_POSITIVE)].groupby(cols["agent"]).size()
+            if cols["duration"]:
+                res["avg_dur_seg"] = df.groupby(cols["agent"])["_dur"].mean().round(0)
+            adf = pd.DataFrame(res).fillna(0)
+            if "contactadas" in adf.columns:
+                adf["tasa_contacto_%"] = (adf["contactadas"] / adf["total"] * 100).round(1)
+            adf = adf.sort_values("total", ascending=False)
+
+            fig_a = px.bar(adf.head(20).reset_index(), x=cols["agent"], y="total",
+                           title="Top Agentes por Volumen", color_discrete_sequence=["#3b82f6"])
+            fig_a.update_layout(**chart_cfg)
+            st.plotly_chart(fig_a, use_container_width=True)
+
+            if "tasa_contacto_%" in adf.columns:
+                fig_ac = px.bar(adf.head(20).sort_values("tasa_contacto_%", ascending=False).reset_index(),
+                                x=cols["agent"], y="tasa_contacto_%",
+                                title="Tasa de Contacto por Agente (%)",
+                                color="tasa_contacto_%",
+                                color_continuous_scale=["#ef4444","#f59e0b","#22c55e"],
+                                range_color=[0, 60])
+                fig_ac.add_hline(y=35, line_dash="dash", line_color="#22c55e",
+                                 annotation_text="Meta 35%")
+                fig_ac.update_layout(**chart_cfg)
+                st.plotly_chart(fig_ac, use_container_width=True)
+
+            st.dataframe(adf.reset_index().head(30), use_container_width=True, hide_index=True)
+        else:
+            st.info("No se detectó columna de agente.")
+
+    with tab4:
+        if cols["date"] and "_dt" in df.columns:
+            df2 = df.copy()
+            df2["_date"] = df2["_dt"].dt.date
+            daily = df2.groupby("_date").size().reset_index(name="llamadas").dropna()
+            if len(daily) > 1:
+                fig_t = go.Figure()
+                fig_t.add_trace(go.Scatter(x=daily["_date"], y=daily["llamadas"],
+                                           mode="lines+markers", name="Llamadas/día",
+                                           line=dict(color="#3b82f6", width=2),
+                                           fill="tozeroy", fillcolor="rgba(59,130,246,0.1)"))
+                if cols["status"]:
+                    dc = df2[df2["_st"].isin(_VIC_CONTACT)].groupby("_date").size().reset_index(name="contactos")
+                    dm = daily.merge(dc, on="_date", how="left").fillna(0)
+                    dm["tasa"] = dm["contactos"] / dm["llamadas"] * 100
+                    fig_t.add_trace(go.Scatter(x=dm["_date"], y=dm["tasa"],
+                                               name="Tasa contacto %", yaxis="y2",
+                                               line=dict(color="#22c55e", width=2, dash="dot")))
+                    fig_t.update_layout(yaxis2=dict(title="Tasa contacto (%)",
+                                                    overlaying="y", side="right", color="#22c55e"))
+                fig_t.update_layout(**chart_cfg, title="Volumen Diario de Llamadas",
+                                    xaxis=dict(title="Fecha"), yaxis=dict(title="Llamadas"))
+                st.plotly_chart(fig_t, use_container_width=True)
+            else:
+                st.info("Solo hay datos de un día. No se puede graficar tendencia.")
+        else:
+            st.info("No se detectó columna de fecha.")
+
+    # ── Exportar ──────────────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("#### Exportar")
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        resumen = pd.DataFrame({
+            "Métrica": ["Total llamadas","Contactados","Tasa contacto","Positivos",
+                        "Tasa positiva","Contestadores AM","No contesta","Duración prom.","Min. totales"],
+            "Valor": [total, contacted, _vic_pct(contacted,total), positives,
+                      _vic_pct(positives,total), int(machines), int(no_answer),
+                      _vic_fmt(avg_dur), f"{total_min:.0f}" if total_min else "–"]
+        })
+        resumen.to_excel(writer, sheet_name="Resumen", index=False)
+        pd.DataFrame([(s,t,b) for s,t,b in points], columns=["Severidad","Título","Descripción"]) \
+            .to_excel(writer, sheet_name="Puntos Críticos", index=False)
+        if cols["status"]:
+            df["_st"].value_counts().reset_index() \
+                .to_excel(writer, sheet_name="Por Estado", index=False)
+        if agent_df_for_alerts is not None:
+            agent_df_for_alerts.reset_index().to_excel(writer, sheet_name="Por Agente", index=False)
+    buf.seek(0)
+
+    st.download_button(
+        "⬇️ Descargar Reporte Excel",
+        data=buf,
+        file_name=f"reporte_vicidial_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ROUTER PRINCIPAL
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -950,6 +1324,7 @@ def main():
         "analisis":    page_analisis,
         "historial":   page_historial,
         "estrategias": page_estrategias,
+        "vicidial":    page_vicidial,
         "admin":       page_admin,
     }
     routes.get(st.session_state.get("page", "inicio"), page_inicio)()
