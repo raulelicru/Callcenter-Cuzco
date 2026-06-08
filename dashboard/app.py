@@ -41,17 +41,57 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-st.markdown("""
-<style>
-.stApp { background-color: #0f1117; }
-[data-testid="stDataFrame"] { border: 1px solid #2a3045; border-radius: 8px; }
-hr { border-color: #2a3045; }
-.login-card {
-    background: #1e2535; border-radius: 16px; padding: 40px 36px;
-    border: 1px solid #2a3045; box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+# ── Temas ─────────────────────────────────────────────────────────────────────
+TEMAS = {
+    "Dark": {
+        "bg":        "#0f1117",
+        "bg2":       "#1e2535",
+        "border":    "#2a3045",
+        "text":      "#e2e8f0",
+        "subtext":   "#6b7a99",
+        "card_bg":   "#1e2535",
+    },
+    "Light": {
+        "bg":        "#f4f6fa",
+        "bg2":       "#ffffff",
+        "border":    "#d1d9e6",
+        "text":      "#1a1f2e",
+        "subtext":   "#5a6580",
+        "card_bg":   "#ffffff",
+    },
 }
-</style>
-""", unsafe_allow_html=True)
+
+def aplicar_tema():
+    t = TEMAS[st.session_state.get("tema", "Dark")]
+    st.markdown(f"""
+    <style>
+    .stApp {{
+        background-color: {t['bg']};
+        color: {t['text']};
+    }}
+    [data-testid="stSidebar"] {{
+        background-color: {t['bg2']};
+        border-right: 1px solid {t['border']};
+    }}
+    [data-testid="stDataFrame"] {{
+        border: 1px solid {t['border']};
+        border-radius: 8px;
+    }}
+    hr {{ border-color: {t['border']}; }}
+    .login-card {{
+        background: {t['card_bg']};
+        border-radius: 16px;
+        padding: 40px 36px;
+        border: 1px solid {t['border']};
+        box-shadow: 0 8px 32px rgba(0,0,0,0.15);
+        color: {t['text']};
+    }}
+    h1, h2, h3, h4, p, label, div {{
+        color: {t['text']} !important;
+    }}
+    .stMarkdown, .stText {{ color: {t['text']}; }}
+    </style>
+    """, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -108,13 +148,20 @@ def guardar_tablero(cuenta: str, nombre: str, sheets: dict[str, pd.DataFrame]):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def show_login():
+    aplicar_tema()
     _, col, _ = st.columns([1, 1.2, 1])
     with col:
         st.markdown("<br><br><br>", unsafe_allow_html=True)
+        tema_login = st.radio("Tema", ["Dark", "Light"], horizontal=True,
+                              index=0 if st.session_state.get("tema","Dark")=="Dark" else 1,
+                              key="tema_login_radio")
+        if tema_login != st.session_state.get("tema", "Dark"):
+            st.session_state["tema"] = tema_login
+            st.rerun()
         st.markdown("""
         <div class="login-card">
-            <p style="font-size:1.6rem;font-weight:800;color:#fff;margin-bottom:4px">Call Center</p>
-            <p style="color:#6b7a99;font-size:0.95rem;margin-bottom:28px">Reportes Diarios GRAL — VICIdial</p>
+            <p style="font-size:1.6rem;font-weight:800;margin-bottom:4px">Call Center</p>
+            <p style="font-size:0.95rem;margin-bottom:28px">Reportes Diarios GRAL — VICIdial</p>
         </div>
         """, unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
@@ -138,16 +185,25 @@ def show_login():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def show_main():
+    aplicar_tema()
     cuenta = st.session_state["cuenta"]
 
-    # Sidebar: cuenta + cerrar sesion
+    # Sidebar: cuenta + tema + cerrar sesion
     with st.sidebar:
         st.markdown(f"""
         <div style="padding:16px 8px 8px">
-            <div style="font-size:1.1rem;font-weight:700;color:#fff">{cuenta}</div>
-            <div style="font-size:0.8rem;color:#6b7a99;margin-top:2px">Reportes Diarios GRAL</div>
+            <div style="font-size:1.1rem;font-weight:700">{cuenta}</div>
+            <div style="font-size:0.8rem;margin-top:2px">Reportes Diarios GRAL</div>
         </div>
         """, unsafe_allow_html=True)
+        st.divider()
+        tema_actual = st.session_state.get("tema", "Dark")
+        nuevo_tema = st.radio("Tema", ["Dark", "Light"], horizontal=True,
+                              index=0 if tema_actual == "Dark" else 1,
+                              key="tema_sidebar")
+        if nuevo_tema != tema_actual:
+            st.session_state["tema"] = nuevo_tema
+            st.rerun()
         st.divider()
         if _supabase_ok():
             st.caption("Supabase conectado")
