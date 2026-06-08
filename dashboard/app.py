@@ -21,8 +21,9 @@ from vicidial_reports import (
     generar_reportes_diarios, export_report_excel,
     jornada_label, read_tablero_anterior,
 )
+import supabase_storage as sbs
 
-# ── Rutas ─────────────────────────────────────────────────────────────────────
+# ── Rutas (respaldo local) ─────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
@@ -54,8 +55,13 @@ hr { border-color: #2a3045; }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PERSISTENCIA LOCAL
+# PERSISTENCIA (Supabase primero, disco local como respaldo)
 # ─────────────────────────────────────────────────────────────────────────────
+
+@st.cache_resource(show_spinner=False)
+def _supabase_ok() -> bool:
+    return sbs.supabase_disponible()
+
 
 def cuenta_dir(cuenta: str) -> Path:
     d = DATA_DIR / cuenta
@@ -68,13 +74,29 @@ def _hist_path(cuenta: str, nombre: str) -> Path:
 
 
 def cargar_tablero_guardado(cuenta: str, nombre: str) -> dict[str, pd.DataFrame]:
+    # Intentar Supabase primero
+    if _supabase_ok():
+        try:
+            sheets = sbs.cargar_reporte(cuenta, nombre)
+            if sheets:
+                return sheets
+        except Exception:
+            pass
+    # Respaldo: disco local
     p = _hist_path(cuenta, nombre)
-    if not p.exists():
-        return {}
-    return pd.read_excel(p, sheet_name=None)
+    if p.exists():
+        return pd.read_excel(p, sheet_name=None)
+    return {}
 
 
 def guardar_tablero(cuenta: str, nombre: str, sheets: dict[str, pd.DataFrame]):
+    # Guardar en Supabase
+    if _supabase_ok():
+        try:
+            sbs.guardar_reporte(cuenta, nombre, sheets)
+        except Exception:
+            pass
+    # Guardar siempre en disco (respaldo)
     p = _hist_path(cuenta, nombre)
     with pd.ExcelWriter(p, engine="openpyxl") as w:
         for sname, df in sheets.items():
@@ -126,6 +148,11 @@ def show_main():
             <div style="font-size:0.8rem;color:#6b7a99;margin-top:2px">Reportes Diarios GRAL</div>
         </div>
         """, unsafe_allow_html=True)
+        st.divider()
+        if _supabase_ok():
+            st.caption("Supabase conectado")
+        else:
+            st.caption("Sin Supabase — usando disco local")
         st.divider()
         if st.button("Cerrar Sesion", use_container_width=True):
             st.session_state.clear()
