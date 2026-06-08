@@ -1,5 +1,3 @@
-data/
-# models/ — incluido en repo para Streamlit Cloud
 __pycache__/
 *.pyc
 *.pyo
