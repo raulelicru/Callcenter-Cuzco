@@ -480,13 +480,25 @@ def generar_reportes_diarios(
     tablero_contactabilidad_ayer=None,
     control_recontacto_ayer=None,
     tipificacion_gestion_ayer=None,
+    _tableros_precargados: Optional[dict] = None,
 ):
-    """Orquesta la lectura, construccion, acumulado y resumen de los 3 reportes."""
+    """Orquesta la lectura, construccion, acumulado y resumen de los 3 reportes.
+
+    _tableros_precargados: dict opcional con claves 'contactabilidad', 'recontacto',
+    'tipificacion', cada valor ya leido como dict[str, DataFrame] (para cuando la app
+    carga el historial desde disco en lugar de recibir un archivo subido).
+    """
     export_df = enrich_export(read_export_call_report(export_call_report))
 
-    ayer_contac = read_tablero_anterior(tablero_contactabilidad_ayer)
-    ayer_recont = read_tablero_anterior(control_recontacto_ayer)
-    ayer_tipif  = read_tablero_anterior(tipificacion_gestion_ayer)
+    pre = _tableros_precargados or {}
+
+    ayer_contac = pre.get("contactabilidad") if "contactabilidad" in pre else read_tablero_anterior(tablero_contactabilidad_ayer)
+    ayer_recont = pre.get("recontacto")      if "recontacto"      in pre else read_tablero_anterior(control_recontacto_ayer)
+    ayer_tipif  = pre.get("tipificacion")    if "tipificacion"     in pre else read_tablero_anterior(tipificacion_gestion_ayer)
+
+    ayer_contac = ayer_contac or {}
+    ayer_recont = ayer_recont or {}
+    ayer_tipif  = ayer_tipif  or {}
 
     contactabilidad = acumular(build_tablero_contactabilidad(export_df, fecha), ayer_contac)
     recontacto      = acumular(build_control_recontacto(export_df, fecha), ayer_recont)
