@@ -384,7 +384,7 @@ def show_login():
                 if user:
                     st.session_state["user"] = user
                     st.session_state["empresa_nombre"] = empresa_sel
-                    st.session_state["page"] = "inicio"
+                    st.session_state["page"] = "vicidial"
                     st.rerun()
                 else:
                     st.error("Usuario o contrasena incorrectos.")
@@ -1437,7 +1437,7 @@ def main():
         "vicidial":    page_vicidial,
         "admin":       page_admin,
     }
-    routes.get(st.session_state.get("page", "inicio"), page_inicio)()
+    routes.get(st.session_state.get("page", "vicidial"), page_vicidial)()
 
 
 if __name__ == "__main__":
