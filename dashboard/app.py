@@ -1122,34 +1122,42 @@ def page_vicidial():
     st.markdown("*Sube tu archivo de llamadas y obtén el análisis en segundos.*")
     st.divider()
 
-    uploaded = st.file_uploader(
-        "Archivo de llamadas Vicidial — xlsx, xls, csv, txt, docx",
+    uploaded_files = st.file_uploader(
+        "Archivos de llamadas Vicidial — xlsx, csv, txt, docx (puedes subir varios a la vez)",
         type=None,
-        help="Acepta cualquier formato: Excel (.xlsx/.xls), CSV, TXT, Google Docs (.docx)",
+        accept_multiple_files=True,
+        help="Sube uno o varios archivos. Se combinarán automáticamente para el análisis.",
     )
 
-    if uploaded is None:
+    if not uploaded_files:
         with st.expander("¿Qué columnas necesita el archivo?"):
             st.markdown("""
-| Columna | Descripción | Nombres reconocidos |
-|---------|-------------|---------------------|
-| Fecha | Momento de la llamada | `call_date`, `fecha`, `start_time` |
-| Agente | Usuario que marcó | `user`, `agent`, `agente` |
-| Estado | Resultado | `status`, `disposition`, `estado` |
-| Duración | Segundos | `length_in_sec`, `duration`, `duracion` |
-| Campaña | ID campaña | `campaign_id`, `campaign` |
+| Columna | Nombres reconocidos |
+|---------|---------------------|
+| Fecha | `call_date`, `fecha`, `start_time` |
+| Agente | `user`, `agent`, `agente` |
+| Estado | `status`, `disposition`, `estado` |
+| Duración (seg) | `length_in_sec`, `duration`, `duracion` |
+| Campaña | `campaign_id`, `campaign` |
             """)
         return
 
-    with st.spinner("Analizando..."):
-        try:
-            df = _vic_load(uploaded)
-        except Exception as e:
-            st.error(f"Error al leer el archivo: {e}")
+    with st.spinner(f"Procesando {len(uploaded_files)} archivo(s)..."):
+        dfs = []
+        for f in uploaded_files:
+            try:
+                dfs.append(_vic_load(f))
+            except Exception as e:
+                st.warning(f"No se pudo leer **{f.name}**: {e}")
+        if not dfs:
+            st.error("No se pudo leer ningún archivo.")
             return
+        df = pd.concat(dfs, ignore_index=True)
+        if len(uploaded_files) > 1:
+            st.success(f"✅ {len(uploaded_files)} archivos combinados — {len(df):,} registros en total")
 
     if df is None or len(df) == 0:
-        st.error("El archivo está vacío.")
+        st.error("Los archivos están vacíos.")
         return
 
     cols = _vic_detect_cols(df)
