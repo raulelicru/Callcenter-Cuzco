@@ -25,24 +25,27 @@ def verify_password(password: str, stored: str) -> bool:
 
 
 def authenticate(username: str, password: str):
-    client = get_client()
-    resp = (
-        client.table("usuarios")
-        .select("*")
-        .eq("username", username.strip().lower())
-        .eq("activo", 1)
-        .maybe_single()
-        .execute()
-    )
-    user = resp.data
-    if user and verify_password(password, user["password_hash"]):
-        return {
-            "username": user["username"],
-            "nombre":   user["nombre"],
-            "email":    user["email"],
-            "rol":      user["rol"],
-        }
-    return None
+    try:
+        client = get_client()
+        resp = (
+            client.table("usuarios")
+            .select("*")
+            .eq("username", username.strip().lower())
+            .eq("activo", 1)
+            .maybe_single()
+            .execute()
+        )
+        user = resp.data if hasattr(resp, "data") else None
+        if user and verify_password(password, user["password_hash"]):
+            return {
+                "username": user["username"],
+                "nombre":   user["nombre"],
+                "email":    user["email"],
+                "rol":      user["rol"],
+            }
+        return None
+    except Exception:
+        return None
 
 
 def create_user(username: str, password: str, nombre: str, email: str, rol: str):

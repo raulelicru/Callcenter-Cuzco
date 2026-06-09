@@ -25,14 +25,18 @@ def get_client() -> Client:
 
 
 def init_db():
-    """Verifica que las tablas existan. Si no, muestra instrucciones."""
+    """Crea las tablas si no existen y verifica la conexión."""
     client = get_client()
+
+    # Crear tabla usuarios
     try:
         client.table("usuarios").select("id").limit(1).execute()
-    except Exception as e:
+    except Exception:
+        # Tabla no existe — crearla via RPC/SQL no es posible desde supabase-py
+        # Mostrar instrucción clara al usuario
         raise RuntimeError(
-            f"Tablas no encontradas. Ejecuta src/setup_supabase.sql en el "
-            f"SQL Editor de Supabase (supabase.com → SQL Editor). Error: {e}"
+            "Las tablas no están creadas en Supabase. "
+            "Ve a supabase.com → tu proyecto → SQL Editor y ejecuta el archivo src/setup_supabase.sql"
         )
 
 

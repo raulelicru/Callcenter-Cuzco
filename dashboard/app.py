@@ -355,13 +355,17 @@ def show_login():
             if not usuario or not password:
                 st.error("Completa usuario y contrasena.")
             else:
-                user = authenticate(usuario, password)
+                try:
+                    user = authenticate(usuario, password)
+                except Exception as e:
+                    st.error(f"Error de conexión: {e}")
+                    st.stop()
                 if user:
                     st.session_state["user"] = user
                     st.session_state["page"] = "inicio"
                     st.rerun()
                 else:
-                    st.error("Usuario o contrasena incorrectos.")
+                    st.error("Usuario o contrasena incorrectos. Si es la primera vez, ejecuta el SQL de configuracion en Supabase.")
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.caption("Acceso restringido. Contacta al Administrador si tienes problemas.")
