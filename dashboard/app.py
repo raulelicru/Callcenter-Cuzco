@@ -1374,21 +1374,42 @@ def page_vicidial():
 # ROUTER PRINCIPAL
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _bootstrap_users():
-    """Crea usuarios por defecto. Siempre garantiza que el usuario principal exista."""
+def _get_or_create_empresa(nombre: str, slug: str) -> int:
+    """Retorna el id de la empresa, creándola si no existe."""
     try:
-        existing = get_all_users(_eid())
-        existing_names = set(existing["username"].tolist()) if len(existing) > 0 else set()
+        from database import get_empresa_id_by_slug
+        eid = get_empresa_id_by_slug(slug)
+        if eid:
+            return eid
+        create_empresa(nombre, slug)
+        return get_empresa_id_by_slug(slug) or 1
+    except Exception:
+        return 1
 
-        defaults = [
-            ("cuzco",       "coquimbo",    "Administrador", "admin@callcenter.com",      "admin"),
-            ("admin",       "Admin2024!",  "Administrador", "admin2@callcenter.com",     "admin"),
-            ("supervisor",  "Super2024!",  "Supervisor",    "supervisor@callcenter.com", "admin"),
-            ("colaborador", "Colab2024!",  "Colaborador",   "colab@callcenter.com",      "colaborador"),
-        ]
-        for username, password, nombre, email, rol in defaults:
-            if username not in existing_names:
-                create_user(username, password, nombre, email, rol, empresa_id)
+
+def _bootstrap_users():
+    """Crea empresas y usuarios por defecto al primer inicio."""
+    try:
+        # ── Empresa 1: Cuzco ──────────────────────────────────────────────────
+        eid_cuzco = _get_or_create_empresa("Cuzco", "cuzco")
+        existing_cuzco = set(get_all_users(eid_cuzco)["username"].tolist()) if len(get_all_users(eid_cuzco)) > 0 else set()
+        for username, password, nombre, rol in [
+            ("sup1", "Cuzco@Sup1",  "Sup 1", "admin"),
+            ("sup2", "Cuzco@Sup2",  "Sup 2", "admin"),
+        ]:
+            if username not in existing_cuzco:
+                create_user(username, password, nombre, f"{username}@cuzco.com", rol, eid_cuzco)
+
+        # ── Empresa 2: Coquimbo ───────────────────────────────────────────────
+        eid_coquimbo = _get_or_create_empresa("Coquimbo", "coquimbo")
+        existing_coquimbo = set(get_all_users(eid_coquimbo)["username"].tolist()) if len(get_all_users(eid_coquimbo)) > 0 else set()
+        for username, password, nombre, rol in [
+            ("sup3", "Coquimbo@Sup3", "Sup 3", "admin"),
+            ("sup4", "Coquimbo@Sup4", "Sup 4", "admin"),
+        ]:
+            if username not in existing_coquimbo:
+                create_user(username, password, nombre, f"{username}@coquimbo.com", rol, eid_coquimbo)
+
     except Exception:
         pass
 
