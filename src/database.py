@@ -1,6 +1,6 @@
 """
 Base de Datos — Supabase via HTTPS (supabase-py)
-Conecta por HTTP/HTTPS: sin problemas de IPv4/IPv6.
+Todas las operaciones filtran por empresa_id para soporte multi-empresa.
 """
 from supabase import create_client, Client
 import pandas as pd
@@ -25,93 +25,111 @@ def get_client() -> Client:
 
 
 def init_db():
-    """Crea las tablas si no existen y verifica la conexión."""
     client = get_client()
-
-    # Crear tabla usuarios
     try:
         client.table("usuarios").select("id").limit(1).execute()
-    except Exception:
-        # Tabla no existe — crearla via RPC/SQL no es posible desde supabase-py
-        # Mostrar instrucción clara al usuario
+    except Exception as e:
         raise RuntimeError(
             "Las tablas no están creadas en Supabase. "
-            "Ve a supabase.com → tu proyecto → SQL Editor y ejecuta el archivo src/setup_supabase.sql"
+            "Ve a supabase.com → tu proyecto → SQL Editor y ejecuta src/setup_supabase.sql. "
+            f"Error: {e}"
         )
 
 
-def get_clientes_by_ids(ids: list) -> pd.DataFrame:
+# ── Empresas ──────────────────────────────────────────────────────────────────
+
+def get_all_empresas() -> pd.DataFrame:
+    client = get_client()
+    resp = client.table("empresas").select("*").order("nombre").execute()
+    return pd.DataFrame(resp.data) if resp.data else pd.DataFrame()
+
+
+def create_empresa(nombre: str, slug: str) -> tuple[bool, str]:
+    try:
+        client = get_client()
+        client.table("empresas").insert({"nombre": nombre, "slug": slug}).execute()
+        return True, f"Empresa '{nombre}' creada."
+    except Exception as e:
+        return False, str(e)
+
+
+def get_empresa_id_by_slug(slug: str) -> int:
+    client = get_client()
+    resp = client.table("empresas").select("id").eq("slug", slug).maybe_single().execute()
+    return resp.data["id"] if resp.data else 1
+
+
+# ── Clientes ──────────────────────────────────────────────────────────────────
+
+def get_clientes_by_ids(ids: list, empresa_id: int = 1) -> pd.DataFrame:
     if not ids:
         return pd.DataFrame()
     client = get_client()
     all_rows = []
     for i in range(0, len(ids), 500):
-        resp = client.table("clientes").select("*").in_("cliente_id", ids[i:i+500]).execute()
-        all_rows.extend(resp.data or [])
+        batch = ids[i:i+500]
+        resp = (
+            client.table("clientes")
+            .select("cliente_id")
+            .in_("cliente_id", batch)
+            .eq("empresa_id", empresa_id)
+            .execute()
+        )
+        if resp.data:
+            all_rows.extend(resp.data)
     return pd.DataFrame(all_rows) if all_rows else pd.DataFrame()
 
 
-def upsert_clientes_batch(df: pd.DataFrame, carga_id: int) -> dict:
+def upsert_clientes_batch(df: pd.DataFrame, carga_id: int, empresa_id: int = 1):
     client = get_client()
-    today = datetime.today().strftime("%Y-%m-%d")
-
-    # Detectar nuevos vs existentes antes del upsert
-    all_ids = df["cliente_id"].astype(str).tolist()
-    df_ex = get_clientes_by_ids(all_ids)
-    existing_ids = set(df_ex["cliente_id"].tolist()) if len(df_ex) > 0 else set()
-    nuevos      = sum(1 for i in all_ids if i not in existing_ids)
-    actualizados = len(all_ids) - nuevos
-
-    records = [
-        {
-            "cliente_id":            str(row.get("cliente_id", "")),
-            "score_operativo":       int(row.get("score_operativo", 0) or 0),
-            "segmento":              str(row.get("segmento", "")),
-            "prob_pago":             float(row.get("prob_pago", 0) or 0),
-            "dpd":                   int(row.get("dpd", 0) or 0),
-            "bucket_mora":           str(row.get("bucket_mora", "")),
-            "saldo_total":           float(row.get("saldo_total", 0) or 0),
-            "rpc_rate":              float(row.get("rpc_rate", 0) or 0),
-            "ultimo_estado_marcado": str(row.get("ultimo_estado_marcado", "")),
-            "estrategia_canal":      str(row.get("estrategia_canal", "")),
-            "estrategia_accion":     str(row.get("estrategia_accion", "")),
-            "estrategia_oferta":     str(row.get("estrategia_oferta", "")),
-            "fecha_primera_carga":   today,
-            "fecha_ultima_carga":    today,
-        }
-        for _, row in df.iterrows()
+    cols = [
+        "cliente_id", "empresa_id", "score_operativo", "segmento", "prob_pago",
+        "dpd", "bucket_mora", "saldo_total", "rpc_rate", "ultimo_estado_marcado",
+        "estrategia_canal", "estrategia_accion", "estrategia_oferta",
+        "fecha_primera_carga", "fecha_ultima_carga",
     ]
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    records = []
+    for _, row in df.iterrows():
+        r = {"empresa_id": empresa_id, "fecha_ultima_carga": now}
+        for c in cols:
+            if c in df.columns:
+                v = row[c]
+                r[c] = None if pd.isna(v) else v
+        if "fecha_primera_carga" not in df.columns or pd.isna(row.get("fecha_primera_carga")):
+            r["fecha_primera_carga"] = now
+        records.append(r)
 
-    # Upsert en lotes — el trigger protege fecha_primera_carga y veces_procesado
-    CHUNK = 1000
-    for i in range(0, len(records), CHUNK):
+    BATCH = 200
+    for i in range(0, len(records), BATCH):
         client.table("clientes").upsert(
-            records[i:i+CHUNK], on_conflict="cliente_id"
+            records[i:i+BATCH],
+            on_conflict="cliente_id,empresa_id"
         ).execute()
 
-    # Historial en lotes
-    hist = [
-        {
+    # Historial
+    hist = []
+    for _, row in df.iterrows():
+        hist.append({
+            "empresa_id":      empresa_id,
             "cliente_id":      str(row.get("cliente_id", "")),
-            "score_operativo": int(row.get("score_operativo", 0) or 0),
-            "segmento":        str(row.get("segmento", "")),
-            "prob_pago":       float(row.get("prob_pago", 0) or 0),
-            "dpd":             int(row.get("dpd", 0) or 0),
-            "saldo_total":     float(row.get("saldo_total", 0) or 0),
-            "fecha_score":     today,
+            "score_operativo": int(row["score_operativo"]) if "score_operativo" in df.columns else None,
+            "segmento":        row.get("segmento"),
+            "prob_pago":       float(row["prob_pago"]) if "prob_pago" in df.columns else None,
+            "dpd":             int(row["dpd"]) if "dpd" in df.columns and not pd.isna(row.get("dpd")) else None,
+            "saldo_total":     float(row["saldo_total"]) if "saldo_total" in df.columns and not pd.isna(row.get("saldo_total")) else None,
+            "fecha_score":     now,
             "carga_id":        carga_id,
-        }
-        for _, row in df.iterrows()
-    ]
-    for i in range(0, len(hist), CHUNK):
-        client.table("historial_scores").insert(hist[i:i+CHUNK]).execute()
-
-    return {"nuevos": nuevos, "actualizados": actualizados}
+        })
+    for i in range(0, len(hist), BATCH):
+        client.table("historial_scores").insert(hist[i:i+BATCH]).execute()
 
 
-def log_carga(usuario: str, filename: str, total: int, nuevos: int, actualizados: int) -> int:
+def log_carga(usuario: str, filename: str, total: int, nuevos: int,
+              actualizados: int, empresa_id: int = 1) -> int:
     client = get_client()
     resp = client.table("cargas").insert({
+        "empresa_id":             empresa_id,
         "usuario":                usuario,
         "filename":               filename,
         "total_registros":        total,
@@ -122,18 +140,23 @@ def log_carga(usuario: str, filename: str, total: int, nuevos: int, actualizados
     return resp.data[0]["id"]
 
 
-def get_cargas_historico() -> pd.DataFrame:
+def get_cargas_historico(empresa_id: int = 1) -> pd.DataFrame:
     client = get_client()
-    resp = client.table("cargas").select("*").order("fecha_carga", desc=True).limit(100).execute()
+    resp = (
+        client.table("cargas")
+        .select("*")
+        .eq("empresa_id", empresa_id)
+        .order("fecha_carga", desc=True)
+        .limit(100)
+        .execute()
+    )
     return pd.DataFrame(resp.data) if resp.data else pd.DataFrame()
 
 
-def get_metricas_globales() -> dict:
+def get_metricas_globales(empresa_id: int = 1) -> dict:
     client = get_client()
-
-    # Intentar con la función RPC; si falla, calcular directamente desde la tabla
     try:
-        resp = client.rpc("get_metricas_globales").execute()
+        resp = client.rpc("get_metricas_globales", {"p_empresa_id": empresa_id}).execute()
         data = resp.data or {}
         if data:
             return {
@@ -147,33 +170,28 @@ def get_metricas_globales() -> dict:
     except Exception:
         pass
 
-    # Fallback: calcular desde la tabla clientes directamente
-    resp = client.table("clientes").select(
-        "segmento, score_operativo, prob_pago, saldo_total"
-    ).execute()
+    # Fallback directo desde tabla
+    resp = (
+        client.table("clientes")
+        .select("segmento, score_operativo, prob_pago, saldo_total")
+        .eq("empresa_id", empresa_id)
+        .execute()
+    )
     rows = resp.data or []
-
     if not rows:
-        return {
-            "total_clientes": 0,
-            "por_segmento":   {},
-            "avg_score":      0.0,
-            "avg_prob_pago":  0.0,
-            "saldo_total":    0.0,
-            "total_cargas":   0,
-        }
+        return {"total_clientes": 0, "por_segmento": {}, "avg_score": 0.0,
+                "avg_prob_pago": 0.0, "saldo_total": 0.0, "total_cargas": 0}
 
     df = pd.DataFrame(rows)
     por_segmento = {}
     for seg, grp in df.groupby("segmento"):
         por_segmento[seg] = {
-            "count": len(grp),
-            "saldo": float(grp["saldo_total"].fillna(0).sum()),
+            "count":     len(grp),
+            "saldo":     float(grp["saldo_total"].fillna(0).sum()),
             "avg_score": float(grp["score_operativo"].fillna(0).mean()),
         }
-
     try:
-        n_cargas = client.table("cargas").select("id", count="exact").execute().count or 0
+        n_cargas = client.table("cargas").select("id", count="exact").eq("empresa_id", empresa_id).execute().count or 0
     except Exception:
         n_cargas = 0
 
@@ -187,11 +205,12 @@ def get_metricas_globales() -> dict:
     }
 
 
-def get_all_clientes_df(limit: int = 10000) -> pd.DataFrame:
+def get_all_clientes_df(limit: int = 10000, empresa_id: int = 1) -> pd.DataFrame:
     client = get_client()
     resp = (
         client.table("clientes")
         .select("*")
+        .eq("empresa_id", empresa_id)
         .order("score_operativo", desc=True)
         .limit(limit)
         .execute()

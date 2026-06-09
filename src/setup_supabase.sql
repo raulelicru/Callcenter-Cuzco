@@ -2,8 +2,17 @@
 -- SETUP INICIAL — Ejecutar UNA SOLA VEZ en Supabase SQL Editor
 -- ============================================================
 
+CREATE TABLE IF NOT EXISTS empresas (
+    id             SERIAL PRIMARY KEY,
+    nombre         TEXT UNIQUE NOT NULL,
+    slug           TEXT UNIQUE NOT NULL,
+    activa         INTEGER DEFAULT 1,
+    fecha_creacion TEXT DEFAULT CURRENT_DATE::TEXT
+);
+
 CREATE TABLE IF NOT EXISTS clientes (
-    cliente_id            TEXT PRIMARY KEY,
+    cliente_id            TEXT NOT NULL,
+    empresa_id            INTEGER NOT NULL DEFAULT 1,
     score_operativo       INTEGER,
     segmento              TEXT,
     prob_pago             REAL,
@@ -17,12 +26,14 @@ CREATE TABLE IF NOT EXISTS clientes (
     estrategia_oferta     TEXT,
     veces_procesado       INTEGER DEFAULT 1,
     fecha_primera_carga   TEXT,
-    fecha_ultima_carga    TEXT
+    fecha_ultima_carga    TEXT,
+    PRIMARY KEY (cliente_id, empresa_id)
 );
 
 CREATE TABLE IF NOT EXISTS historial_scores (
     id              SERIAL PRIMARY KEY,
     cliente_id      TEXT,
+    empresa_id      INTEGER DEFAULT 1,
     score_operativo INTEGER,
     segmento        TEXT,
     prob_pago       REAL,
@@ -34,6 +45,7 @@ CREATE TABLE IF NOT EXISTS historial_scores (
 
 CREATE TABLE IF NOT EXISTS cargas (
     id                     SERIAL PRIMARY KEY,
+    empresa_id             INTEGER DEFAULT 1,
     usuario                TEXT,
     filename               TEXT,
     total_registros        INTEGER,
@@ -44,14 +56,20 @@ CREATE TABLE IF NOT EXISTS cargas (
 
 CREATE TABLE IF NOT EXISTS usuarios (
     id             SERIAL PRIMARY KEY,
-    username       TEXT UNIQUE NOT NULL,
+    empresa_id     INTEGER NOT NULL DEFAULT 1,
+    username       TEXT NOT NULL,
     nombre         TEXT NOT NULL,
     email          TEXT,
     rol            TEXT NOT NULL,
     password_hash  TEXT NOT NULL,
     activo         INTEGER DEFAULT 1,
-    fecha_creacion TEXT DEFAULT CURRENT_DATE::TEXT
+    fecha_creacion TEXT DEFAULT CURRENT_DATE::TEXT,
+    UNIQUE (username, empresa_id)
 );
+
+-- Empresa por defecto
+INSERT INTO empresas (nombre, slug) VALUES ('Principal', 'principal')
+ON CONFLICT (slug) DO NOTHING;
 
 -- Trigger: protege fecha_primera_carga y auto-incrementa veces_procesado en UPDATE
 CREATE OR REPLACE FUNCTION protect_cliente_history()
@@ -68,33 +86,30 @@ CREATE TRIGGER trg_protect_cliente
     BEFORE UPDATE ON clientes
     FOR EACH ROW EXECUTE FUNCTION protect_cliente_history();
 
--- Funcion RPC para metricas globales (evita transferir 353K filas)
-CREATE OR REPLACE FUNCTION get_metricas_globales()
+-- Funcion RPC para metricas globales por empresa
+CREATE OR REPLACE FUNCTION get_metricas_globales(p_empresa_id INTEGER DEFAULT 1)
 RETURNS jsonb
 LANGUAGE sql
 SECURITY DEFINER
 AS $$
     SELECT jsonb_build_object(
-        'total_clientes', (SELECT COUNT(*) FROM clientes),
-        'avg_score',      (SELECT ROUND(COALESCE(AVG(score_operativo),0)::numeric, 1) FROM clientes),
-        'avg_prob_pago',  (SELECT ROUND((COALESCE(AVG(prob_pago),0)*100)::numeric, 1) FROM clientes),
-        'saldo_total',    (SELECT ROUND(COALESCE(SUM(saldo_total),0)::numeric, 2) FROM clientes),
-        'total_cargas',   (SELECT COUNT(*) FROM cargas),
+        'total_clientes', (SELECT COUNT(*) FROM clientes WHERE empresa_id = p_empresa_id),
+        'avg_score',      (SELECT ROUND(COALESCE(AVG(score_operativo),0)::numeric, 1) FROM clientes WHERE empresa_id = p_empresa_id),
+        'avg_prob_pago',  (SELECT ROUND((COALESCE(AVG(prob_pago),0)*100)::numeric, 1) FROM clientes WHERE empresa_id = p_empresa_id),
+        'saldo_total',    (SELECT ROUND(COALESCE(SUM(saldo_total),0)::numeric, 2) FROM clientes WHERE empresa_id = p_empresa_id),
+        'total_cargas',   (SELECT COUNT(*) FROM cargas WHERE empresa_id = p_empresa_id),
         'por_segmento',   (
             SELECT COALESCE(jsonb_object_agg(
                 segmento,
-                jsonb_build_object(
-                    'count',     cnt,
-                    'avg_score', avg_s,
-                    'saldo',     saldo
-                )
+                jsonb_build_object('count', cnt, 'avg_score', avg_s, 'saldo', saldo)
             ), '{}'::jsonb)
             FROM (
                 SELECT segmento,
-                       COUNT(*)                                          AS cnt,
+                       COUNT(*) AS cnt,
                        ROUND(COALESCE(AVG(score_operativo),0)::numeric, 1) AS avg_s,
-                       ROUND(COALESCE(SUM(saldo_total),0)::numeric, 2)    AS saldo
+                       ROUND(COALESCE(SUM(saldo_total),0)::numeric, 2) AS saldo
                 FROM clientes
+                WHERE empresa_id = p_empresa_id
                 GROUP BY segmento
             ) s
         )

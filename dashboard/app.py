@@ -31,6 +31,7 @@ _VIC_STATUS_LABELS = {
 from database import (
     init_db, get_clientes_by_ids, upsert_clientes_batch,
     log_carga, get_cargas_historico, get_metricas_globales, get_all_clientes_df,
+    get_all_empresas, create_empresa,
 )
 from auth import authenticate, create_user, get_all_users, toggle_user_status, update_password
 
@@ -258,7 +259,7 @@ def process_upload(df_raw, pipeline, usuario, filename):
 
     # ── Detectar conocidos vs nuevos en BD ──────────────────────────────────────
     ids = df_raw["cliente_id"].tolist()
-    df_ex = get_clientes_by_ids(ids)
+    df_ex = get_clientes_by_ids(ids, _eid())
     ids_conocidos = set(df_ex["cliente_id"].tolist()) if len(df_ex) > 0 else set()
     n_conocidos = sum(1 for i in ids if i in ids_conocidos)
     n_nuevos    = len(ids) - n_conocidos
@@ -270,8 +271,8 @@ def process_upload(df_raw, pipeline, usuario, filename):
     df_scored["plan_personalizado"] = df_scored.apply(_generate_plan, axis=1)
 
     # ── Guardar en BD ───────────────────────────────────────────────────────────
-    carga_id = log_carga(usuario, filename, len(df_scored), n_nuevos, n_conocidos)
-    upsert_clientes_batch(df_scored, carga_id)
+    carga_id = log_carga(usuario, filename, len(df_scored), n_nuevos, n_conocidos, _eid())
+    upsert_clientes_batch(df_scored, carga_id, _eid())
 
     return df_scored, {
         "total":        len(df_scored),
@@ -334,6 +335,11 @@ def card_metrica(label, valor, delta=None, color="#3b82f6"):
 # LOGIN
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _eid() -> int:
+    """Retorna el empresa_id del usuario en sesión."""
+    return st.session_state.get("user", {}).get("empresa_id", 1)
+
+
 def show_login():
     _, col, _ = st.columns([1, 1.1, 1])
     with col:
@@ -346,7 +352,19 @@ def show_login():
         """, unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
+
+        # Selector de empresa
+        try:
+            empresas_df = get_all_empresas()
+            if len(empresas_df) > 0:
+                empresa_opciones = dict(zip(empresas_df["nombre"], empresas_df["id"]))
+            else:
+                empresa_opciones = {"Principal": 1}
+        except Exception:
+            empresa_opciones = {"Principal": 1}
+
         with st.form("login_form"):
+            empresa_sel = st.selectbox("Empresa", list(empresa_opciones.keys()))
             usuario  = st.text_input("Usuario", placeholder="Ingresa tu usuario")
             password = st.text_input("Contrasena", type="password", placeholder="••••••••")
             ingresar = st.form_submit_button("Ingresar", use_container_width=True, type="primary")
@@ -355,17 +373,19 @@ def show_login():
             if not usuario or not password:
                 st.error("Completa usuario y contrasena.")
             else:
+                empresa_id = empresa_opciones.get(empresa_sel, 1)
                 try:
-                    user = authenticate(usuario, password)
+                    user = authenticate(usuario, password, empresa_id)
                 except Exception as e:
                     st.error(f"Error de conexión: {e}")
                     st.stop()
                 if user:
                     st.session_state["user"] = user
+                    st.session_state["empresa_nombre"] = empresa_sel
                     st.session_state["page"] = "inicio"
                     st.rerun()
                 else:
-                    st.error("Usuario o contrasena incorrectos. Si es la primera vez, ejecuta el SQL de configuracion en Supabase.")
+                    st.error("Usuario o contrasena incorrectos.")
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.caption("Acceso restringido. Contacta al Administrador si tienes problemas.")
@@ -378,8 +398,10 @@ def show_login():
 def show_sidebar():
     user = st.session_state["user"]
     with st.sidebar:
+        empresa_nombre = st.session_state.get("empresa_nombre", "")
         st.markdown(f"""
         <div style="padding: 16px 8px 8px;">
+            <div style="font-size:0.75rem;color:#3b82f6;font-weight:600;text-transform:uppercase;letter-spacing:0.05em">{empresa_nombre}</div>
             <div style="font-size:1.1rem;font-weight:700;color:#fff">{user['nombre']}</div>
             <div style="font-size:0.8rem;color:#6b7a99;margin-top:2px">
                 {'Administrador' if user['rol']=='admin' else 'Colaborador'}
@@ -425,7 +447,7 @@ def page_inicio():
     st.markdown(f"*Actualizado: {datetime.now().strftime('%d/%m/%Y %H:%M')}*")
     st.divider()
 
-    m = get_metricas_globales()
+    m = get_metricas_globales(_eid())
     total = m["total_clientes"]
 
     if total == 0:
@@ -447,7 +469,7 @@ def page_inicio():
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    df_db = get_all_clientes_df(limit=10000)
+    df_db = get_all_clientes_df(limit=10000, empresa_id=_eid())
     col_l, col_r = st.columns(2)
 
     with col_l:
@@ -507,7 +529,7 @@ def page_inicio():
         st.plotly_chart(fig3, use_container_width=True)
 
     st.markdown("#### Ultimas Cargas")
-    df_cargas = get_cargas_historico()
+    df_cargas = get_cargas_historico(_eid())
     if len(df_cargas) > 0:
         st.dataframe(df_cargas.head(6), hide_index=True, use_container_width=True)
 
@@ -662,7 +684,7 @@ def page_analisis():
     st.markdown("## Analisis de Cartera")
     st.divider()
 
-    df = get_all_clientes_df(limit=20000)
+    df = get_all_clientes_df(limit=20000, empresa_id=_eid())
     if len(df) == 0:
         st.info("Carga tu primera cartera para ver el analisis.")
         return
@@ -769,7 +791,7 @@ def page_historial():
     st.markdown("## Historial de Cargas")
     st.divider()
 
-    df = get_cargas_historico()
+    df = get_cargas_historico(_eid())
     if len(df) == 0:
         st.info("No hay cargas registradas aun.")
         return
@@ -873,11 +895,15 @@ def page_admin():
     st.markdown("## Panel de Administracion")
     st.divider()
 
-    tab1, tab2, tab3 = st.tabs(["Usuarios del Sistema", "Crear Usuario", "Cambiar Contrasena"])
+    _tabs = ["Usuarios del Sistema", "Crear Usuario", "Cambiar Contrasena"]
+    if _eid() == 1:
+        _tabs.append("Gestionar Empresas")
+    _tab_objs = st.tabs(_tabs)
+    tab1, tab2, tab3 = _tab_objs[0], _tab_objs[1], _tab_objs[2]
 
     with tab1:
         st.markdown("#### Lista de Usuarios")
-        df_u = get_all_users()
+        df_u = get_all_users(_eid())
         st.dataframe(
             df_u, hide_index=True, use_container_width=True,
             column_config={
@@ -891,7 +917,7 @@ def page_admin():
         if opciones:
             sel = st.selectbox("Selecciona usuario", opciones)
             if st.button(f"Cambiar estado de '{sel}'", type="primary"):
-                toggle_user_status(sel)
+                toggle_user_status(sel, _eid())
                 st.success(f"Estado de '{sel}' actualizado.")
                 st.rerun()
 
@@ -911,22 +937,40 @@ def page_admin():
                 elif not nu or not nn:
                     st.error("Username y nombre son obligatorios.")
                 else:
-                    ok, msg = create_user(nu, np_, nn, ne, nr)
+                    ok, msg = create_user(nu, np_, nn, ne, nr, _eid())
                     (st.success if ok else st.error)(msg)
 
     with tab3:
         st.markdown("#### Cambiar Contrasena")
-        df_u2 = get_all_users()
+        df_u2 = get_all_users(_eid())
         with st.form("cambiar_pass"):
-            us = st.selectbox("Usuario", df_u2["username"].tolist())
+            us = st.selectbox("Usuario", df_u2["username"].tolist() if len(df_u2) > 0 else [])
             p1 = st.text_input("Nueva contrasena", type="password")
             p2 = st.text_input("Confirmar contrasena", type="password")
             if st.form_submit_button("Actualizar Contrasena", type="primary"):
                 if p1 != p2:
                     st.error("Las contrasenas no coinciden.")
                 else:
-                    ok, msg = update_password(us, p1)
+                    ok, msg = update_password(us, p1, _eid())
                     (st.success if ok else st.error)(msg)
+
+    if _eid() == 1 and len(_tab_objs) > 3:
+        with _tab_objs[3]:
+            st.markdown("#### Empresas registradas")
+            df_emp = get_all_empresas()
+            st.dataframe(df_emp, hide_index=True, use_container_width=True)
+            st.markdown("#### Agregar nueva empresa")
+            with st.form("nueva_empresa"):
+                e_nombre = st.text_input("Nombre de la empresa")
+                e_slug   = st.text_input("Slug (identificador único, sin espacios)", placeholder="empresa-abc")
+                if st.form_submit_button("Crear Empresa", type="primary"):
+                    if not e_nombre or not e_slug:
+                        st.error("Completa nombre y slug.")
+                    else:
+                        ok, msg = create_empresa(e_nombre, e_slug.lower().replace(" ", "-"))
+                        (st.success if ok else st.error)(msg)
+                        if ok:
+                            st.info(f"Empresa '{e_nombre}' creada. Ahora crea un usuario admin para esa empresa desde esta misma página seleccionando el empresa_id correspondiente.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1333,7 +1377,7 @@ def page_vicidial():
 def _bootstrap_users():
     """Crea usuarios por defecto. Siempre garantiza que el usuario principal exista."""
     try:
-        existing = get_all_users()
+        existing = get_all_users(_eid())
         existing_names = set(existing["username"].tolist()) if len(existing) > 0 else set()
 
         defaults = [
@@ -1344,7 +1388,7 @@ def _bootstrap_users():
         ]
         for username, password, nombre, email, rol in defaults:
             if username not in existing_names:
-                create_user(username, password, nombre, email, rol)
+                create_user(username, password, nombre, email, rol, empresa_id)
     except Exception:
         pass
 
