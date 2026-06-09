@@ -2,13 +2,13 @@
 Base de Datos — Supabase via HTTPS (supabase-py)
 Todas las operaciones filtran por empresa_id para soporte multi-empresa.
 """
-from supabase import create_client, Client
+from supabase import create_client
 import pandas as pd
 from datetime import datetime
 import os
 
 
-def get_client() -> Client:
+def get_client():
     try:
         import streamlit as st
         s = st.secrets["supabase"]
@@ -44,7 +44,7 @@ def get_all_empresas() -> pd.DataFrame:
     return pd.DataFrame(resp.data) if resp.data else pd.DataFrame()
 
 
-def create_empresa(nombre: str, slug: str) -> tuple[bool, str]:
+def create_empresa(nombre: str, slug: str):
     try:
         client = get_client()
         client.table("empresas").insert({"nombre": nombre, "slug": slug}).execute()
