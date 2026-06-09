@@ -524,7 +524,7 @@ def page_cargar():
 
     uploaded = st.file_uploader(
         "Selecciona el archivo de cartera — xlsx, xls, csv, txt, docx",
-        type=["xlsx","xls","csv","txt","docx","XLSX","XLS","CSV","TXT","DOCX"],
+        type=None,
         help="Acepta cualquier formato: Excel (.xlsx/.xls), CSV, TXT, Google Docs (.docx)",
     )
 
@@ -1074,7 +1074,7 @@ def page_vicidial():
 
     uploaded = st.file_uploader(
         "Archivo de llamadas Vicidial — xlsx, xls, csv, txt, docx",
-        type=["xlsx","xls","csv","txt","docx","XLSX","XLS","CSV","TXT","DOCX"],
+        type=None,
         help="Acepta cualquier formato: Excel (.xlsx/.xls), CSV, TXT, Google Docs (.docx)",
     )
 
