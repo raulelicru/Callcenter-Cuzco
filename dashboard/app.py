@@ -523,9 +523,9 @@ def page_cargar():
         return
 
     uploaded = st.file_uploader(
-        "Selecciona el archivo de cartera",
-        type=["xlsx", "xls", "csv", "txt", "docx"],
-        help="Acepta Excel, CSV, TXT y Google Docs / Word (.docx). El .docx debe tener los datos en una tabla.",
+        "Selecciona el archivo de cartera — xlsx, xls, csv, txt, docx",
+        type=None,
+        help="Acepta cualquier formato: Excel (.xlsx/.xls), CSV, TXT, Google Docs (.docx)",
     )
 
     if uploaded is None:
@@ -1073,9 +1073,9 @@ def page_vicidial():
     st.divider()
 
     uploaded = st.file_uploader(
-        "Archivo de llamadas Vicidial (CSV, Excel, TXT, Google Docs)",
-        type=["csv","xlsx","xls","txt","docx"],
-        help="Exporta desde Vicidial Admin → Reports → Call Report. También acepta Google Docs (.docx) con tabla de datos.",
+        "Archivo de llamadas Vicidial — xlsx, xls, csv, txt, docx",
+        type=None,
+        help="Acepta cualquier formato: Excel (.xlsx/.xls), CSV, TXT, Google Docs (.docx)",
     )
 
     if uploaded is None:
