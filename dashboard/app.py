@@ -1331,16 +1331,19 @@ def page_vicidial():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _bootstrap_users():
-    """Crea usuarios por defecto si la tabla esta vacia (primera vez en Supabase)."""
+    """Crea usuarios por defecto. Siempre garantiza que el usuario principal exista."""
     try:
         existing = get_all_users()
-        if len(existing) == 0:
-            defaults = [
-                ("admin",       "Admin2024!",  "Administrador", "admin@callcenter.com",      "admin"),
-                ("supervisor",  "Super2024!",  "Supervisor",    "supervisor@callcenter.com", "admin"),
-                ("colaborador", "Colab2024!",  "Colaborador",   "colab@callcenter.com",      "colaborador"),
-            ]
-            for username, password, nombre, email, rol in defaults:
+        existing_names = set(existing["username"].tolist()) if len(existing) > 0 else set()
+
+        defaults = [
+            ("cuzco",       "coquimbo",    "Administrador", "admin@callcenter.com",      "admin"),
+            ("admin",       "Admin2024!",  "Administrador", "admin2@callcenter.com",     "admin"),
+            ("supervisor",  "Super2024!",  "Supervisor",    "supervisor@callcenter.com", "admin"),
+            ("colaborador", "Colab2024!",  "Colaborador",   "colab@callcenter.com",      "colaborador"),
+        ]
+        for username, password, nombre, email, rol in defaults:
+            if username not in existing_names:
                 create_user(username, password, nombre, email, rol)
     except Exception:
         pass
