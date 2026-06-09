@@ -359,9 +359,11 @@ def show_login():
             if len(empresas_df) > 0:
                 empresa_opciones = dict(zip(empresas_df["nombre"], empresas_df["id"]))
             else:
-                empresa_opciones = {"Principal": 1}
-        except Exception:
-            empresa_opciones = {"Principal": 1}
+                st.warning("No se encontraron empresas en la base de datos.")
+                empresa_opciones = {"Cuzco": 1, "Coquimbo": 2}
+        except Exception as e:
+            st.error(f"Error al cargar empresas: {e}")
+            empresa_opciones = {"Cuzco": 1, "Coquimbo": 2}
 
         with st.form("login_form"):
             empresa_sel = st.selectbox("Empresa", list(empresa_opciones.keys()))
