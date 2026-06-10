@@ -13,11 +13,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 import joblib, io
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
 
 # ── Constantes Vicidial ───────────────────────────────────────────────────────
-_VIC_CONTACT  = {"SALE", "CALLBK", "DEC", "NI", "XFER", "INCALL", "CLOSER"}
-_VIC_POSITIVE = {"SALE", "CALLBK", "XFER"}
 _VIC_MACHINE  = {"AA", "AM", "LAMA"}
 _VIC_NOANSWER = {"N", "NA", "NNA", "B", "BUSY", "DC", "DROP", "QUEUETIMEOUT"}
 _VIC_STATUS_LABELS = {
@@ -26,6 +24,21 @@ _VIC_STATUS_LABELS = {
     "AA":"Contestador","AM":"Contestador","B":"Ocupado","BUSY":"Ocupado",
     "DC":"Desconectado","DROP":"Caida","LAMA":"Limit.contestador",
     "QUEUETIMEOUT":"Timeout cola","INCALL":"En llamada","DNCL":"No llamar",
+}
+
+# Reglas de la campaña GRAL (reporte diario de 6 archivos)
+_VIC_GRAL_PROMESA   = {"04", "21"}
+_VIC_GRAL_SALUDO    = "01"
+_VIC_GRAL_HUMANOS   = {"01", "02", "04", "09", "14", "18", "19", "21"}
+_VIC_GRAL_LABELS    = {
+    "01": "Cuelga en saludo (rechazo temprano)",
+    "02": "Contacto - no interesado",
+    "04": "Promesa de pago",
+    "09": "Contacto humano",
+    "14": "Contacto humano",
+    "18": "Contacto humano",
+    "19": "Contacto humano",
+    "21": "Promesa de pago (alterna)",
 }
 
 from database import (
@@ -979,22 +992,6 @@ def page_admin():
 # PAGINA: REPORTE VICIDIAL
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _vic_detect_cols(df: pd.DataFrame) -> dict:
-    c = {col.lower().strip(): col for col in df.columns}
-    def find(*names):
-        for n in names:
-            if n in c:
-                return c[n]
-        return None
-    return {
-        "date":     find("call_date","fecha","date","start_time","calldate","call_time"),
-        "agent":    find("user","agent","agente","operator","username","agent_user"),
-        "status":   find("status","estado","disposition","call_status","result"),
-        "duration": find("length_in_sec","duration","duracion","call_duration","seconds","length","talk_time"),
-        "campaign": find("campaign_id","campaign","campana","lista","list_id"),
-    }
-
-
 def _read_any_file(uploaded) -> pd.DataFrame:
     """Lee CSV, Excel, TXT o DOCX y devuelve un DataFrame."""
     name = uploaded.name.lower()
@@ -1117,99 +1114,334 @@ def _vic_critical(total, contacted, machines, no_answer, avg_dur, agent_df):
     return points
 
 
+def _vic_find(df: pd.DataFrame, *substrings) -> str | None:
+    """Busca una columna cuyo nombre (en minúsculas) contenga alguno de los substrings."""
+    cl = {c.lower().strip(): c for c in df.columns}
+    for sub in substrings:
+        for k, v in cl.items():
+            if sub in k:
+                return v
+    return None
+
+
+def _vic_status_norm(series: pd.Series) -> pd.Series:
+    s = series.astype(str).str.strip().str.upper()
+    s = s.str.replace(r"\.0$", "", regex=True)
+    return s.where(~s.str.fullmatch(r"\d"), s.str.zfill(2))
+
+
+def _vic_extract_date_from_name(name: str):
+    import re
+    m = re.search(r"(20\d{6})", name)
+    if m:
+        try:
+            return datetime.strptime(m.group(1), "%Y%m%d").date()
+        except Exception:
+            return None
+    return None
+
+
+def _vic_export_cols(df: pd.DataFrame) -> dict:
+    return {
+        "status":       _vic_find(df, "status"),
+        "phone":        _vic_find(df, "phone_number", "phone", "telefono"),
+        "date":         _vic_find(df, "call_date", "date", "fecha"),
+        "agent":        _vic_find(df, "user", "agent", "agente"),
+        "entidad":      _vic_find(df, "list_id", "campaign_id", "entidad"),
+        "monto":        _vic_find(df, "postal_code"),
+        "estado_deudor":_vic_find(df, "first_name"),
+        "lead_id":      _vic_find(df, "lead_id"),
+    }
+
+
+def _vic_filter_jornada(df: pd.DataFrame, c: dict, fecha):
+    """Si la fecha es sábado, filtra la jornada a 8:00-12:00 (media jornada)."""
+    if fecha is None or fecha.weekday() != 5 or not c["date"]:
+        return df, False
+    dt = pd.to_datetime(df[c["date"]], errors="coerce")
+    mask = dt.dt.hour.between(8, 11)
+    return df[mask], True
+
+
+def _vic_tablero_contactabilidad(df: pd.DataFrame, c: dict, fecha) -> dict:
+    total = len(df)
+    humanos  = df[df["_st"].isin(_VIC_GRAL_HUMANOS)]
+    promesas = df[df["_st"].isin(_VIC_GRAL_PROMESA)]
+    saludo   = df[df["_st"] == _VIC_GRAL_SALUDO]
+    gestion  = humanos[humanos["_st"] != _VIC_GRAL_SALUDO]
+
+    monto_total = 0.0
+    if c["monto"]:
+        monto_total = pd.to_numeric(promesas[c["monto"]], errors="coerce").fillna(0).sum()
+
+    resumen = pd.DataFrame({
+        "Métrica": ["Fecha", "Total llamadas", "Total humanos (contacto)", "% Contactabilidad",
+                    "Cuelga en saludo (status 01)", "% Cuelga en saludo",
+                    "Gestión efectiva (humanos - saludo)",
+                    "Promesas de pago (04+21)", "% Promesas sobre gestión",
+                    "Monto comprometido (S/)"],
+        "Valor": [str(fecha), total, len(humanos), _vic_pct(len(humanos), total),
+                  len(saludo), _vic_pct(len(saludo), total),
+                  len(gestion),
+                  len(promesas), _vic_pct(len(promesas), len(gestion)),
+                  round(float(monto_total), 2)],
+    })
+
+    por_estado = df["_st"].value_counts().rename_axis("Status").reset_index(name="Llamadas")
+    por_estado["Descripción"] = por_estado["Status"].map(_VIC_GRAL_LABELS).fillna(
+        por_estado["Status"].map(_VIC_STATUS_LABELS)).fillna("—")
+    por_estado["%"] = (por_estado["Llamadas"] / total * 100).round(2) if total else 0
+
+    por_entidad = pd.DataFrame()
+    if c["entidad"]:
+        ent = df.copy()
+        ent["_evasion"]  = ent["_st"].isin(_VIC_NOANSWER | _VIC_MACHINE)
+        ent["_saludo"]   = ent["_st"] == _VIC_GRAL_SALUDO
+        ent["_humano"]   = ent["_st"].isin(_VIC_GRAL_HUMANOS)
+        ent["_promesa"]  = ent["_st"].isin(_VIC_GRAL_PROMESA)
+        por_entidad = ent.groupby(c["entidad"]).agg(
+            total=("_st", "count"),
+            humanos=("_humano", "sum"),
+            evasion=("_evasion", "sum"),
+            cuelga_saludo=("_saludo", "sum"),
+            promesas=("_promesa", "sum"),
+        ).reset_index()
+        por_entidad["%_evasion"] = (por_entidad["evasion"] / por_entidad["total"] * 100).round(1)
+        por_entidad["%_cuelga"]  = (por_entidad["cuelga_saludo"] / por_entidad["total"] * 100).round(1)
+
+    return {
+        "resumen": resumen, "por_estado": por_estado, "por_entidad": por_entidad,
+        "kpis": {"total": total, "humanos": len(humanos), "promesas": len(promesas),
+                 "saludo": len(saludo), "monto": float(monto_total), "gestion": len(gestion)},
+    }
+
+
+def _vic_control_recontacto(df: pd.DataFrame, c: dict, fecha) -> dict | None:
+    key = c["phone"] or c["lead_id"]
+    if not key:
+        return None
+    g = df.groupby(key)
+    res = g.size().rename("llamadas").reset_index()
+    res["ultimo_estado"] = g["_st"].last().values
+    if c["monto"]:
+        res["monto"] = pd.to_numeric(g[c["monto"]].last(), errors="coerce").fillna(0).values
+    if c["estado_deudor"]:
+        res["estado_deudor"] = g[c["estado_deudor"]].last().values
+    res["requiere_recontacto"] = ~res["ultimo_estado"].isin(_VIC_GRAL_PROMESA)
+    res["descripcion_estado"]  = res["ultimo_estado"].map(_VIC_GRAL_LABELS).fillna(
+        res["ultimo_estado"].map(_VIC_STATUS_LABELS)).fillna("—")
+
+    con_promesa = int((~res["requiere_recontacto"]).sum())
+    pendientes  = int(res["requiere_recontacto"].sum())
+    resumen = pd.DataFrame({
+        "Métrica": ["Fecha", "Total leads contactados", "Con promesa de pago",
+                    "Pendientes de recontacto", "% Pendientes de recontacto"],
+        "Valor": [str(fecha), len(res), con_promesa, pendientes, _vic_pct(pendientes, len(res))],
+    })
+    return {"resumen": resumen, "detalle": res,
+            "kpis": {"total_leads": len(res), "promesas": con_promesa, "pendientes": pendientes}}
+
+
+def _vic_tipificacion_gestion(df: pd.DataFrame, c: dict, fecha) -> dict:
+    total = len(df)
+    g = df.groupby("_st").size().rename("llamadas").reset_index().rename(columns={"_st": "Status"})
+    g["%"] = (g["llamadas"] / total * 100).round(2) if total else 0
+    g["Descripción"] = g["Status"].map(_VIC_GRAL_LABELS).fillna(g["Status"].map(_VIC_STATUS_LABELS)).fillna("—")
+    if c["monto"]:
+        montos = df.groupby("_st")[c["monto"]].apply(lambda s: pd.to_numeric(s, errors="coerce").fillna(0).sum())
+        g["monto_total"] = g["Status"].map(montos).fillna(0).round(2)
+
+    por_estado_deudor = pd.DataFrame()
+    if c["estado_deudor"]:
+        por_estado_deudor = df.groupby(c["estado_deudor"]).size().rename("count") \
+            .reset_index().sort_values("count", ascending=False)
+
+    resumen = pd.DataFrame({
+        "Métrica": ["Fecha", "Total registros", "Tipos de gestión distintos"],
+        "Valor": [str(fecha), total, df["_st"].nunique()],
+    })
+    return {"resumen": resumen, "por_status": g, "por_estado_deudor": por_estado_deudor,
+            "kpis": {"total": total}}
+
+
+def _vic_append_historico(prev_upload, resumen_df: pd.DataFrame) -> pd.DataFrame:
+    row_df = pd.DataFrame([dict(zip(resumen_df["Métrica"], resumen_df["Valor"]))])
+    hist = row_df
+    if prev_upload is not None:
+        try:
+            prev_upload.seek(0)
+            hist_prev = pd.read_excel(prev_upload, sheet_name="Histórico")
+            hist = pd.concat([hist_prev, row_df], ignore_index=True)
+        except Exception:
+            try:
+                prev_upload.seek(0)
+                hist_prev = pd.read_excel(prev_upload, sheet_name=0)
+                hist = pd.concat([hist_prev, row_df], ignore_index=True)
+            except Exception:
+                hist = row_df
+    if "Fecha" in hist.columns:
+        hist = hist.drop_duplicates(subset=["Fecha"], keep="last").reset_index(drop=True)
+    return hist
+
+
+def _vic_write_excel(sheets: dict) -> io.BytesIO:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        for name, sdf in sheets.items():
+            if sdf is not None and len(sdf) > 0:
+                sdf.to_excel(writer, sheet_name=name[:31], index=False)
+    buf.seek(0)
+    return buf
+
+
+def _vic_trend_line(hist: pd.DataFrame, metric: str, label: str, fmt="{:.1f}") -> str | None:
+    if hist is None or metric not in hist.columns or len(hist) < 2:
+        return None
+    try:
+        prev = float(str(hist.iloc[-2][metric]).replace("%", ""))
+        curr = float(str(hist.iloc[-1][metric]).replace("%", ""))
+    except (ValueError, TypeError):
+        return None
+    delta = curr - prev
+    arrow = "▲" if delta > 0 else ("▼" if delta < 0 else "→")
+    return f"{label}: {fmt.format(curr)} ({arrow} {fmt.format(abs(delta))} vs. día anterior)"
+
+
 def page_vicidial():
-    st.markdown("## 📞 Reporte de Eficiencia — Vicidial")
-    st.markdown("*Sube tu archivo de llamadas y obtén el análisis en segundos.*")
+    st.markdown("## 📞 Reportes Diarios — Campaña GRAL")
+    st.markdown("*Sube los 6 archivos del día y genera los 3 reportes actualizados: "
+                 "Tablero de Contactabilidad, Control de Recontacto y Tipificación de Gestión.*")
     st.divider()
 
-    uploaded_files = st.file_uploader(
-        "Archivos de llamadas Vicidial — xlsx, csv, txt, docx (puedes subir varios a la vez)",
-        type=None,
-        accept_multiple_files=True,
-        help="Sube uno o varios archivos. Se combinarán automáticamente para el análisis.",
-    )
+    with st.expander("ℹ️ Reglas aplicadas en el cálculo"):
+        st.markdown("""
+- **Promesa de pago** = status `04` + `21` (siempre se suman ambos).
+- **Status `01`** = cuelga en saludo (rechazo temprano), no cuenta como gestión.
+- **Humanos** = status `01, 02, 04, 09, 14, 18, 19, 21` → hoja *Por Entidad* (evasión y cuelga por estado).
+- **Sábado** = media jornada (8 AM–12 PM); se compara sábado contra sábado.
+- El día nuevo se agrega al **acumulado (Histórico)** de cada reporte, leyendo el tablero del día anterior.
+- **Monto comprometido** sale del campo `postal_code` y **estado del deudor** del campo `first_name`
+  (campos reutilizados del export).
+        """)
 
-    if not uploaded_files:
-        with st.expander("¿Qué columnas necesita el archivo?"):
-            st.markdown("""
-| Columna | Nombres reconocidos |
-|---------|---------------------|
-| Fecha | `call_date`, `fecha`, `start_time` |
-| Agente | `user`, `agent`, `agente` |
-| Estado | `status`, `disposition`, `estado` |
-| Duración (seg) | `length_in_sec`, `duration`, `duracion` |
-| Campaña | `campaign_id`, `campaign` |
-            """)
+    st.markdown("#### 1. Archivos frescos de VICIdial (jornada del día)")
+    f_amd     = st.file_uploader("AST_AMD_log_report (.csv)", type=None, key="vic_amd")
+    f_vdad    = st.file_uploader("AST_VDADstats (.csv)", type=None, key="vic_vdad")
+    f_export  = st.file_uploader(
+        "EXPORT_CALL_REPORT — Estados = ALL (.txt/.csv)  ⭐ insumo principal",
+        type=None, key="vic_export")
+    f_carrier = st.file_uploader(
+        "AST_carrier_log_report (.csv) — opcional, diagnóstico de sobre-marcado",
+        type=None, key="vic_carrier")
+
+    st.markdown("#### 2. Tableros del día anterior (acumulado)")
+    f_contact_prev    = st.file_uploader("Tablero_Contactabilidad_GRAL (.xlsx)", type=None, key="vic_contact_prev")
+    f_recontacto_prev = st.file_uploader("Control_Recontacto_GRAL (.xlsx)", type=None, key="vic_recontacto_prev")
+    f_tipif_prev      = st.file_uploader("Tipificacion_Gestion_GRAL (.xlsx)", type=None, key="vic_tipif_prev")
+
+    st.divider()
+
+    if f_export is None:
+        st.info("Sube al menos el **EXPORT_CALL_REPORT (Estados = ALL)** para generar los 3 reportes.")
         return
 
-    with st.spinner(f"Procesando {len(uploaded_files)} archivo(s)..."):
-        dfs = []
-        for f in uploaded_files:
-            try:
-                dfs.append(_vic_load(f))
-            except Exception as e:
-                st.warning(f"No se pudo leer **{f.name}**: {e}")
-        if not dfs:
-            st.error("No se pudo leer ningún archivo.")
+    if not st.button("🚀 Generar Reportes", type="primary"):
+        return
+
+    with st.spinner("Procesando..."):
+        try:
+            df = _vic_load(f_export)
+        except Exception as e:
+            st.error(f"No se pudo leer EXPORT_CALL_REPORT: {e}")
             return
-        df = pd.concat(dfs, ignore_index=True)
-        if len(uploaded_files) > 1:
-            st.success(f"✅ {len(uploaded_files)} archivos combinados — {len(df):,} registros en total")
 
-    if df is None or len(df) == 0:
-        st.error("Los archivos están vacíos.")
-        return
+        c = _vic_export_cols(df)
+        if not c["status"]:
+            st.error("No se encontró la columna **status** en EXPORT_CALL_REPORT. "
+                     "Verifica que el export incluya esa columna.")
+            return
+        df["_st"] = _vic_status_norm(df[c["status"]])
 
-    cols = _vic_detect_cols(df)
-    total = len(df)
+        fecha = _vic_extract_date_from_name(f_export.name) or date.today()
+        df, es_sabado = _vic_filter_jornada(df, c, fecha)
+        if es_sabado:
+            st.info("📅 Detectado **sábado** — se filtró la jornada a 8:00–12:00 (media jornada). "
+                    "Compara este reporte contra el sábado anterior en la hoja *Histórico*.")
 
-    # Preprocesar
-    if cols["status"]:
-        df["_st"] = df[cols["status"]].astype(str).str.upper().str.strip()
-        contacted = df["_st"].isin(_VIC_CONTACT).sum()
-        positives = df["_st"].isin(_VIC_POSITIVE).sum()
-        machines  = df["_st"].isin(_VIC_MACHINE).sum()
-        no_answer = df["_st"].isin(_VIC_NOANSWER).sum()
-    else:
-        contacted = positives = machines = no_answer = 0
+        contact = _vic_tablero_contactabilidad(df, c, fecha)
+        recont  = _vic_control_recontacto(df, c, fecha)
+        tipif   = _vic_tipificacion_gestion(df, c, fecha)
 
-    if cols["duration"]:
-        df["_dur"] = pd.to_numeric(df[cols["duration"]], errors="coerce").fillna(0)
-        avg_dur   = df["_dur"].mean()
-        total_min = df["_dur"].sum() / 60
-    else:
-        avg_dur = total_min = None
-
-    if cols["date"]:
-        df["_dt"] = pd.to_datetime(df[cols["date"]], errors="coerce")
-        df["_hour"] = df["_dt"].dt.hour
+        hist_contact = _vic_append_historico(f_contact_prev, contact["resumen"])
+        hist_tipif   = _vic_append_historico(f_tipif_prev, tipif["resumen"])
+        hist_recont  = _vic_append_historico(f_recontacto_prev, recont["resumen"]) if recont else None
 
     # ── KPIs ──────────────────────────────────────────────────────────────────
-    st.markdown("#### Resumen General")
+    st.markdown("#### Resumen del Día")
     k1, k2, k3, k4, k5 = st.columns(5)
-    _vic_kpi(k1, "Total llamadas", f"{total:,}")
-    cr_color = "#27ae60" if contacted/total >= 0.35 else "#f39c12" if contacted/total >= 0.20 else "#e74c3c"
-    _vic_kpi(k2, "Tasa de contacto", _vic_pct(contacted, total), color=cr_color)
-    pr_color = "#27ae60" if positives/total >= 0.15 else "#f39c12" if positives/total >= 0.08 else "#e74c3c"
-    _vic_kpi(k3, "Tasa positiva", _vic_pct(positives, total), color=pr_color)
-    dur_color = "#27ae60" if avg_dur and 60 <= avg_dur <= 300 else "#f39c12"
-    _vic_kpi(k4, "Duración promedio", _vic_fmt(avg_dur), color=dur_color)
-    _vic_kpi(k5, "Minutos totales", f"{total_min:,.0f}" if total_min else "–")
+    kp = contact["kpis"]
+    cr_color = "#27ae60" if kp["humanos"]/kp["total"] >= 0.35 else "#f39c12" if kp["humanos"]/kp["total"] >= 0.20 else "#e74c3c"
+    _vic_kpi(k1, "Total llamadas", f"{kp['total']:,}")
+    _vic_kpi(k2, "Contactabilidad (humanos)", _vic_pct(kp["humanos"], kp["total"]), color=cr_color)
+    _vic_kpi(k3, "Promesas de pago (04+21)", f"{kp['promesas']:,}")
+    _vic_kpi(k4, "Monto comprometido", f"S/ {kp['monto']:,.2f}")
+    sal_color = "#e74c3c" if kp["saludo"]/kp["total"] > 0.40 else "#f39c12" if kp["saludo"]/kp["total"] > 0.25 else "#27ae60"
+    _vic_kpi(k5, "Cuelga en saludo (01)", _vic_pct(kp["saludo"], kp["total"]), color=sal_color)
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    # ── Alertas / tendencia ──────────────────────────────────────────────────
+    st.markdown("#### Alertas y Tendencia")
+    saludo_rate = kp["saludo"] / kp["total"] if kp["total"] else 0
+    if saludo_rate > 0.40:
+        _vic_alert("Evasión / cuelga en saludo CRÍTICA",
+                   f"{saludo_rate*100:.1f}% de las llamadas cuelgan en el saludo (status 01). "
+                   "Revisar guion de apertura, horario de marcado y calidad de la base.", "#dc2626")
+    elif saludo_rate > 0.25:
+        _vic_alert("Cuelga en saludo elevado",
+                   f"{saludo_rate*100:.1f}% cuelgan en el saludo. Vigilar tendencia.", "#f59e0b")
 
-    # ── Puntos críticos ────────────────────────────────────────────────────────
-    st.markdown("#### Puntos Críticos")
-    agent_df_for_alerts = None
+    if f_vdad is not None:
+        try:
+            vdf = _vic_load(f_vdad)
+            drop_col  = _vic_find(vdf, "drop")
+            calls_col = _vic_find(vdf, "call")
+            if drop_col and calls_col:
+                drops = pd.to_numeric(vdf[drop_col], errors="coerce").fillna(0).sum()
+                calls = pd.to_numeric(vdf[calls_col], errors="coerce").fillna(0).sum()
+                if calls > 0:
+                    drop_rate = drops / calls * 100
+                    if drop_rate > 5:
+                        _vic_alert("DROP / sobre-marcado elevado",
+                                   f"Tasa de DROP {drop_rate:.1f}% según AST_VDADstats. "
+                                   "Reducir nivel de marcado o aumentar agentes disponibles.", "#dc2626")
+                    elif drop_rate > 3:
+                        _vic_alert("DROP por encima del objetivo",
+                                   f"Tasa de DROP {drop_rate:.1f}% (meta < 3%).", "#f59e0b")
+        except Exception:
+            pass
 
-    if cols["agent"] and cols["status"]:
-        ag_total = df.groupby(cols["agent"]).size().rename("total")
-        ag_cont  = df[df["_st"].isin(_VIC_CONTACT)].groupby(cols["agent"]).size().rename("contactadas")
-        adf_tmp  = pd.concat([ag_total, ag_cont], axis=1).fillna(0)
-        adf_tmp["tasa_contacto"] = (adf_tmp["contactadas"] / adf_tmp["total"] * 100).round(1)
-        agent_df_for_alerts = adf_tmp
+    if f_carrier is not None:
+        st.info("📡 AST_carrier_log_report recibido — disponible para diagnóstico puntual de "
+                "sobre-marcado por troncal (no se incluye en los 3 reportes diarios).")
 
-    points = _vic_critical(total, contacted, machines, no_answer, avg_dur, agent_df_for_alerts)
+    trend_lines = []
+    for metric, label, fmt in [
+        ("% Contactabilidad", "Contactabilidad", "{}"),
+        ("% Cuelga en saludo", "Cuelga en saludo", "{}"),
+        ("Promesas de pago (04+21)", "Promesas de pago", "{:.0f}"),
+        ("Monto comprometido (S/)", "Monto comprometido (S/)", "{:.2f}"),
+    ]:
+        line = _vic_trend_line(hist_contact, metric, label, fmt)
+        if line:
+            trend_lines.append(line)
+
+    if trend_lines:
+        st.markdown("**Tendencia vs. día anterior:**")
+        for line in trend_lines:
+            st.markdown(f"- {line}")
+    else:
+        st.caption("Sube el Tablero_Contactabilidad_GRAL del día anterior para ver la tendencia.")
+
+    points = _vic_critical(kp["total"], kp["humanos"], 0, kp["saludo"], None, None)
     color_map = {"rojo": "#dc2626", "naranja": "#f59e0b", "verde": "#22c55e"}
     for severity, title, body in points:
         if severity == "verde":
@@ -1217,167 +1449,80 @@ def page_vicidial():
         else:
             _vic_alert(title, body, color_map[severity])
 
-    # ── Gráficos ──────────────────────────────────────────────────────────────
-    st.markdown("#### Análisis Visual")
-    chart_cfg = dict(paper_bgcolor="#1e2535", plot_bgcolor="#1e2535",
-                     font=dict(color="#aaa", size=12), margin=dict(t=36, b=20, l=10, r=10))
-
-    tab1, tab2, tab3, tab4 = st.tabs(["Distribución", "Por Hora", "Por Agente", "Tendencia Diaria"])
+    # ── Detalle de los 3 reportes ────────────────────────────────────────────
+    st.markdown("#### Detalle de los Reportes")
+    tab1, tab2, tab3 = st.tabs(["Tablero de Contactabilidad", "Control de Recontacto", "Tipificación de Gestión"])
 
     with tab1:
-        c_a, c_b = st.columns(2)
-        with c_a:
-            if cols["status"]:
-                sc = df["_st"].value_counts().head(12).reset_index()
-                sc.columns = ["Status", "Llamadas"]
-                sc["Label"] = sc["Status"].map(_VIC_STATUS_LABELS).fillna(sc["Status"])
-                fig = px.pie(sc, values="Llamadas", names="Label", title="Distribución por Estado",
-                             hole=0.4, color_discrete_sequence=px.colors.qualitative.Set3)
-                fig.update_layout(**chart_cfg, height=340)
-                st.plotly_chart(fig, use_container_width=True)
-        with c_b:
-            if cols["status"]:
-                cats = {"Contacto efectivo": contacted, "No contesta": int(no_answer),
-                        "Contestador AM": int(machines),
-                        "Otros": max(0, total - contacted - int(no_answer) - int(machines))}
-                fig2 = px.bar(x=list(cats.keys()), y=list(cats.values()),
-                              title="Resultado de Llamadas",
-                              color=list(cats.keys()),
-                              color_discrete_map={"Contacto efectivo":"#22c55e","No contesta":"#ef4444",
-                                                  "Contestador AM":"#f59e0b","Otros":"#6b7280"})
-                fig2.update_layout(**chart_cfg, height=340, showlegend=False)
-                st.plotly_chart(fig2, use_container_width=True)
-        if cols["duration"]:
-            dur_data = df["_dur"][df["_dur"].between(1, 3600)]
-            fig3 = px.histogram(dur_data, nbins=50, title="Distribución de Duración (seg)",
-                                color_discrete_sequence=["#3b82f6"])
-            fig3.add_vline(x=dur_data.mean(), line_dash="dash", line_color="#f59e0b",
-                           annotation_text=f"Prom: {dur_data.mean():.0f}s")
-            fig3.update_layout(**chart_cfg)
-            st.plotly_chart(fig3, use_container_width=True)
+        st.dataframe(contact["resumen"], use_container_width=True, hide_index=True)
+        st.markdown("##### Por Estado")
+        st.dataframe(contact["por_estado"], use_container_width=True, hide_index=True)
+        if len(contact["por_entidad"]) > 0:
+            st.markdown("##### Por Entidad (evasión y cuelga por estado)")
+            st.dataframe(contact["por_entidad"], use_container_width=True, hide_index=True)
+        if len(hist_contact) > 1:
+            st.markdown("##### Histórico Acumulado")
+            st.dataframe(hist_contact, use_container_width=True, hide_index=True)
 
     with tab2:
-        if cols["date"] and "_hour" in df.columns:
-            hc = df.groupby("_hour").size().reindex(range(24), fill_value=0)
-            fig_h = go.Figure()
-            fig_h.add_trace(go.Bar(x=hc.index, y=hc.values, name="Total llamadas",
-                                   marker_color="#3b82f6", opacity=0.7))
-            if cols["status"]:
-                hcon = df[df["_st"].isin(_VIC_CONTACT)].groupby("_hour").size().reindex(range(24), fill_value=0)
-                fig_h.add_trace(go.Scatter(x=hcon.index, y=hcon.values, name="Contactos",
-                                           line=dict(color="#22c55e", width=2), mode="lines+markers"))
-                best = hcon.idxmax()
-                st.info(f"Mejor hora para contactar: **{best}:00 – {best+1}:00** ({hcon[best]:,} contactos)")
-            fig_h.update_layout(**chart_cfg, title="Llamadas por Hora del Día",
-                                xaxis=dict(title="Hora", tickmode="linear", tick0=0, dtick=1),
-                                yaxis=dict(title="Llamadas"),
-                                legend=dict(x=0, y=1.1, orientation="h"))
-            st.plotly_chart(fig_h, use_container_width=True)
-
-            dow_order = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
-            dow_es    = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"]
-            dow = df.groupby(df["_dt"].dt.day_name()).size().reindex(
-                [d for d in dow_order if d in df["_dt"].dt.day_name().values], fill_value=0)
-            dow.index = [dow_es[dow_order.index(d)] for d in dow.index]
-            fig_d = px.bar(x=dow.index, y=dow.values, title="Llamadas por Día de Semana",
-                           color_discrete_sequence=["#8b5cf6"])
-            fig_d.update_layout(**chart_cfg)
-            st.plotly_chart(fig_d, use_container_width=True)
+        if recont is None:
+            st.info("No se detectó columna de teléfono / lead_id en el export para generar este reporte.")
         else:
-            st.info("No se detectó columna de fecha.")
+            st.dataframe(recont["resumen"], use_container_width=True, hide_index=True)
+            st.markdown("##### Detalle por Lead")
+            st.dataframe(recont["detalle"], use_container_width=True, hide_index=True)
+            if hist_recont is not None and len(hist_recont) > 1:
+                st.markdown("##### Histórico Acumulado")
+                st.dataframe(hist_recont, use_container_width=True, hide_index=True)
 
     with tab3:
-        if cols["agent"]:
-            ag_total = df.groupby(cols["agent"]).size().rename("total")
-            res = {"total": ag_total}
-            if cols["status"]:
-                res["contactadas"] = df[df["_st"].isin(_VIC_CONTACT)].groupby(cols["agent"]).size()
-                res["positivas"]   = df[df["_st"].isin(_VIC_POSITIVE)].groupby(cols["agent"]).size()
-            if cols["duration"]:
-                res["avg_dur_seg"] = df.groupby(cols["agent"])["_dur"].mean().round(0)
-            adf = pd.DataFrame(res).fillna(0)
-            if "contactadas" in adf.columns:
-                adf["tasa_contacto_%"] = (adf["contactadas"] / adf["total"] * 100).round(1)
-            adf = adf.sort_values("total", ascending=False)
+        st.dataframe(tipif["resumen"], use_container_width=True, hide_index=True)
+        st.markdown("##### Por Tipo de Gestión (Status)")
+        st.dataframe(tipif["por_status"], use_container_width=True, hide_index=True)
+        if len(tipif["por_estado_deudor"]) > 0:
+            st.markdown("##### Por Estado del Deudor")
+            st.dataframe(tipif["por_estado_deudor"], use_container_width=True, hide_index=True)
+        if len(hist_tipif) > 1:
+            st.markdown("##### Histórico Acumulado")
+            st.dataframe(hist_tipif, use_container_width=True, hide_index=True)
 
-            fig_a = px.bar(adf.head(20).reset_index(), x=cols["agent"], y="total",
-                           title="Top Agentes por Volumen", color_discrete_sequence=["#3b82f6"])
-            fig_a.update_layout(**chart_cfg)
-            st.plotly_chart(fig_a, use_container_width=True)
-
-            if "tasa_contacto_%" in adf.columns:
-                fig_ac = px.bar(adf.head(20).sort_values("tasa_contacto_%", ascending=False).reset_index(),
-                                x=cols["agent"], y="tasa_contacto_%",
-                                title="Tasa de Contacto por Agente (%)",
-                                color="tasa_contacto_%",
-                                color_continuous_scale=["#ef4444","#f59e0b","#22c55e"],
-                                range_color=[0, 60])
-                fig_ac.add_hline(y=35, line_dash="dash", line_color="#22c55e",
-                                 annotation_text="Meta 35%")
-                fig_ac.update_layout(**chart_cfg)
-                st.plotly_chart(fig_ac, use_container_width=True)
-
-            st.dataframe(adf.reset_index().head(30), use_container_width=True, hide_index=True)
-        else:
-            st.info("No se detectó columna de agente.")
-
-    with tab4:
-        if cols["date"] and "_dt" in df.columns:
-            df2 = df.copy()
-            df2["_date"] = df2["_dt"].dt.date
-            daily = df2.groupby("_date").size().reset_index(name="llamadas").dropna()
-            if len(daily) > 1:
-                fig_t = go.Figure()
-                fig_t.add_trace(go.Scatter(x=daily["_date"], y=daily["llamadas"],
-                                           mode="lines+markers", name="Llamadas/día",
-                                           line=dict(color="#3b82f6", width=2),
-                                           fill="tozeroy", fillcolor="rgba(59,130,246,0.1)"))
-                if cols["status"]:
-                    dc = df2[df2["_st"].isin(_VIC_CONTACT)].groupby("_date").size().reset_index(name="contactos")
-                    dm = daily.merge(dc, on="_date", how="left").fillna(0)
-                    dm["tasa"] = dm["contactos"] / dm["llamadas"] * 100
-                    fig_t.add_trace(go.Scatter(x=dm["_date"], y=dm["tasa"],
-                                               name="Tasa contacto %", yaxis="y2",
-                                               line=dict(color="#22c55e", width=2, dash="dot")))
-                    fig_t.update_layout(yaxis2=dict(title="Tasa contacto (%)",
-                                                    overlaying="y", side="right", color="#22c55e"))
-                fig_t.update_layout(**chart_cfg, title="Volumen Diario de Llamadas",
-                                    xaxis=dict(title="Fecha"), yaxis=dict(title="Llamadas"))
-                st.plotly_chart(fig_t, use_container_width=True)
-            else:
-                st.info("Solo hay datos de un día. No se puede graficar tendencia.")
-        else:
-            st.info("No se detectó columna de fecha.")
-
-    # ── Exportar ──────────────────────────────────────────────────────────────
+    # ── Exportar los 3 reportes ──────────────────────────────────────────────
     st.divider()
-    st.markdown("#### Exportar")
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        resumen = pd.DataFrame({
-            "Métrica": ["Total llamadas","Contactados","Tasa contacto","Positivos",
-                        "Tasa positiva","Contestadores AM","No contesta","Duración prom.","Min. totales"],
-            "Valor": [total, contacted, _vic_pct(contacted,total), positives,
-                      _vic_pct(positives,total), int(machines), int(no_answer),
-                      _vic_fmt(avg_dur), f"{total_min:.0f}" if total_min else "–"]
-        })
-        resumen.to_excel(writer, sheet_name="Resumen", index=False)
-        pd.DataFrame([(s,t,b) for s,t,b in points], columns=["Severidad","Título","Descripción"]) \
-            .to_excel(writer, sheet_name="Puntos Críticos", index=False)
-        if cols["status"]:
-            df["_st"].value_counts().reset_index() \
-                .to_excel(writer, sheet_name="Por Estado", index=False)
-        if agent_df_for_alerts is not None:
-            agent_df_for_alerts.reset_index().to_excel(writer, sheet_name="Por Agente", index=False)
-    buf.seek(0)
+    st.markdown("#### Descargar Reportes Actualizados")
+    fecha_str = fecha.strftime("%Y%m%d")
+    e1, e2, e3 = st.columns(3)
 
-    st.download_button(
-        "⬇️ Descargar Reporte Excel",
-        data=buf,
-        file_name=f"reporte_vicidial_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary",
-    )
+    with e1:
+        buf1 = _vic_write_excel({
+            "Resumen": contact["resumen"], "Por Estado": contact["por_estado"],
+            "Por Entidad": contact["por_entidad"], "Histórico": hist_contact,
+        })
+        st.download_button("⬇️ Tablero_Contactabilidad_GRAL", data=buf1,
+            file_name=f"Tablero_Contactabilidad_GRAL_{fecha_str}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+
+    with e2:
+        if recont is not None:
+            buf2 = _vic_write_excel({
+                "Resumen": recont["resumen"], "Detalle": recont["detalle"],
+                "Histórico": hist_recont,
+            })
+            st.download_button("⬇️ Control_Recontacto_GRAL", data=buf2,
+                file_name=f"Control_Recontacto_GRAL_{fecha_str}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+        else:
+            st.caption("No disponible (falta columna de teléfono/lead_id).")
+
+    with e3:
+        buf3 = _vic_write_excel({
+            "Resumen": tipif["resumen"], "Por Status": tipif["por_status"],
+            "Por Estado Deudor": tipif["por_estado_deudor"], "Histórico": hist_tipif,
+        })
+        st.download_button("⬇️ Tipificacion_Gestion_GRAL", data=buf3,
+            file_name=f"Tipificacion_Gestion_GRAL_{fecha_str}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+
+    return
 
 
 # ─────────────────────────────────────────────────────────────────────────────
