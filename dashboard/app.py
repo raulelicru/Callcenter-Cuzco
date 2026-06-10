@@ -90,8 +90,20 @@ hr { border-color: #e2e8f0 !important; }
 [data-testid="stMarkdownContainer"] {
     color: #0f172a !important;
 }
-.stApp span:not([style]) { color: #0f172a !important; }
 [data-testid="stSidebar"] [data-testid="stCaptionContainer"] { color: #64748b !important; }
+
+/* Cargador de archivos (drag & drop) legible en modo claro */
+[data-testid="stFileUploaderDropzone"] {
+    background: #f1f5f9 !important;
+    border: 1px dashed #cbd5e1 !important;
+}
+[data-testid="stFileUploaderDropzone"] * { color: #0f172a !important; }
+[data-testid="stFileUploaderDropzone"] button {
+    background: #ffffff !important;
+    border: 1px solid #cbd5e1 !important;
+    color: #0f172a !important;
+}
+[data-testid="stFileUploaderFile"] { color: #0f172a !important; }
 """
 
 # ── CSS Global ────────────────────────────────────────────────────────────────
