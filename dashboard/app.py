@@ -1324,20 +1324,22 @@ def page_vicidial():
   (campos reutilizados del export).
         """)
 
-    st.markdown("#### 1. Archivos frescos de VICIdial (jornada del día)")
+    st.markdown("#### 1. Archivos frescos de VICIdial (jornada del día) — 3 archivos")
     f_amd     = st.file_uploader("AST_AMD_log_report (.csv)", type=None, key="vic_amd")
     f_vdad    = st.file_uploader("AST_VDADstats (.csv)", type=None, key="vic_vdad")
     f_export  = st.file_uploader(
         "EXPORT_CALL_REPORT — Estados = ALL (.txt/.csv)  ⭐ insumo principal",
         type=None, key="vic_export")
-    f_carrier = st.file_uploader(
-        "AST_carrier_log_report (.csv) — opcional, diagnóstico de sobre-marcado",
-        type=None, key="vic_carrier")
 
-    st.markdown("#### 2. Tableros del día anterior (acumulado)")
+    st.markdown("#### 2. Tableros del día anterior (acumulado) — 3 archivos")
     f_contact_prev    = st.file_uploader("Tablero_Contactabilidad_GRAL (.xlsx)", type=None, key="vic_contact_prev")
     f_recontacto_prev = st.file_uploader("Control_Recontacto_GRAL (.xlsx)", type=None, key="vic_recontacto_prev")
     f_tipif_prev      = st.file_uploader("Tipificacion_Gestion_GRAL (.xlsx)", type=None, key="vic_tipif_prev")
+
+    with st.expander("➕ Extra (no cuenta en los 6) — diagnóstico de sobre-marcado"):
+        f_carrier = st.file_uploader(
+            "AST_carrier_log_report (.csv) — opcional, diagnóstico de sobre-marcado por troncal",
+            type=None, key="vic_carrier")
 
     st.divider()
 
