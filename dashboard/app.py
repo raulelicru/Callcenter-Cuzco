@@ -60,9 +60,28 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ── Tema (Oscuro / Claro) ─────────────────────────────────────────────────────
+st.session_state.setdefault("theme", "Oscuro")
+
+_LIGHT_CSS = """
+.stApp {
+    --background-color: #ffffff;
+    --secondary-background-color: #f1f5f9;
+    --text-color: #0f172a;
+    background-color: #ffffff !important;
+}
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%) !important;
+    border-right: 1px solid #e2e8f0 !important;
+}
+[data-testid="stSidebar"] .stButton button { color: #475569 !important; }
+[data-testid="stSidebar"] .stButton button:hover { background: #e2e8f0 !important; color: #0f172a !important; }
+hr { border-color: #e2e8f0 !important; }
+[data-testid="stDataFrame"] { border: 1px solid #e2e8f0 !important; }
+"""
+
 # ── CSS Global ────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
+_BASE_CSS = """
 /* Fondo general */
 .stApp { background-color: #0f1117; }
 
@@ -152,8 +171,10 @@ hr { border-color: #2a3045; }
     border-top: 3px solid;
     text-align: center;
 }
-</style>
-""", unsafe_allow_html=True)
+"""
+
+_css = _BASE_CSS + (_LIGHT_CSS if st.session_state["theme"] == "Claro" else "")
+st.markdown(f"<style>{_css}</style>", unsafe_allow_html=True)
 
 # ── Colores por segmento ──────────────────────────────────────────────────────
 COLORES = {"ALTO": "#27ae60", "MEDIO": "#f39c12", "BAJO": "#e74c3c"}
@@ -426,27 +447,42 @@ def show_sidebar():
         st.divider()
 
         pages = {
-            "inicio":      "  Inicio",
-            "cargar":      "  Cargar Cartera",
-            "analisis":    "  Analisis",
-            "historial":   "  Historial",
-            "estrategias": "  Estrategias",
-            "vicidial":    "  Reporte Vicidial",
+            "inicio":      ("  Inicio", "Resumen general: total de clientes, score promedio, "
+                             "probabilidad de pago y saldo total de la cartera, por segmento."),
+            "cargar":      ("  Cargar Cartera", "Sube el archivo de tu cartera de clientes para "
+                             "calcular su score, segmento y plan de cobranza personalizado."),
+            "analisis":    ("  Analisis", "Gráficos de la cartera: score vs. mora, buckets de mora, "
+                             "RPC por segmento, último estado de marcado y saldos."),
+            "historial":   ("  Historial", "Historial de cargas realizadas a la base de datos "
+                             "(fecha, usuario, registros nuevos y actualizados)."),
+            "estrategias": ("  Estrategias", "Estrategias de cobranza recomendadas por segmento "
+                             "(canal, oferta, frecuencia, script y KPIs)."),
+            "vicidial":    ("  Reporte Vicidial", "Genera los 3 reportes diarios de la campaña GRAL "
+                             "(Contactabilidad, Recontacto y Tipificación) a partir de los 6 archivos del día."),
         }
         if user["rol"] == "admin":
-            pages["admin"] = "  Panel Admin"
+            pages["admin"] = ("  Panel Admin", "Gestión de usuarios (crear, activar/desactivar, "
+                               "cambiar contraseña) y, para la empresa principal, alta de nuevas empresas.")
 
         cur = st.session_state.get("page", "inicio")
-        for key, label in pages.items():
+        for key, (label, desc) in pages.items():
             is_active = cur == key
             btn_style = "primary" if is_active else "secondary"
-            if st.button(label, use_container_width=True, type=btn_style, key=f"nav_{key}"):
+            if st.button(label, use_container_width=True, type=btn_style, key=f"nav_{key}", help=desc):
                 st.session_state["page"] = key
                 st.rerun()
 
         st.divider()
         if st.button("Cerrar Sesion", use_container_width=True, key="logout"):
             st.session_state.clear()
+            st.rerun()
+
+        st.divider()
+        tema = st.radio("Apariencia", ["Oscuro", "Claro"],
+                         index=0 if st.session_state["theme"] == "Oscuro" else 1,
+                         horizontal=True, key="theme_radio")
+        if tema != st.session_state["theme"]:
+            st.session_state["theme"] = tema
             st.rerun()
 
         st.markdown("<br>", unsafe_allow_html=True)
