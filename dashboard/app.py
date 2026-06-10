@@ -78,6 +78,20 @@ _LIGHT_CSS = """
 [data-testid="stSidebar"] .stButton button:hover { background: #e2e8f0 !important; color: #0f172a !important; }
 hr { border-color: #e2e8f0 !important; }
 [data-testid="stDataFrame"] { border: 1px solid #e2e8f0 !important; }
+
+/* Texto general legible sobre fondo blanco (no afecta tarjetas con fondo propio) */
+.stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6,
+.stApp p, .stApp li, .stApp label,
+[data-testid="stCaptionContainer"],
+[data-testid="stMetricLabel"], [data-testid="stMetricValue"],
+[data-testid="stExpander"] summary,
+[data-testid="stExpander"] summary span,
+[data-testid="stExpander"] p,
+[data-testid="stMarkdownContainer"] {
+    color: #0f172a !important;
+}
+.stApp span:not([style]) { color: #0f172a !important; }
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] { color: #64748b !important; }
 """
 
 # ── CSS Global ────────────────────────────────────────────────────────────────
@@ -99,9 +113,9 @@ _BASE_CSS = """
     border-left: 4px solid;
     margin-bottom: 8px;
 }
-.metrica-valor { font-size: 2rem; font-weight: 700; color: #ffffff; margin: 0; }
-.metrica-label { font-size: 0.78rem; color: #8899aa; margin: 0; text-transform: uppercase; letter-spacing: 0.05em; }
-.metrica-delta { font-size: 0.85rem; margin-top: 4px; }
+.metrica .metrica-valor { font-size: 2rem; font-weight: 700; color: #ffffff !important; margin: 0; }
+.metrica .metrica-label { font-size: 0.78rem; color: #8899aa !important; margin: 0; text-transform: uppercase; letter-spacing: 0.05em; }
+.metrica .metrica-delta { font-size: 0.85rem; margin-top: 4px; }
 
 /* Badge de segmento */
 .badge {
@@ -112,9 +126,9 @@ _BASE_CSS = """
     font-weight: 700;
     letter-spacing: 0.05em;
 }
-.badge-alto  { background: #1a3a1a; color: #4ade80; border: 1px solid #27ae60; }
-.badge-medio { background: #3a2a00; color: #fbbf24; border: 1px solid #f39c12; }
-.badge-bajo  { background: #3a0f0f; color: #f87171; border: 1px solid #e74c3c; }
+.badge-alto  { background: #1a3a1a; color: #4ade80 !important; border: 1px solid #27ae60; }
+.badge-medio { background: #3a2a00; color: #fbbf24 !important; border: 1px solid #f39c12; }
+.badge-bajo  { background: #3a0f0f; color: #f87171 !important; border: 1px solid #e74c3c; }
 
 /* Card de estrategia */
 .card-estrategia {
@@ -132,8 +146,8 @@ _BASE_CSS = """
     border: 1px solid #2a3045;
     box-shadow: 0 8px 32px rgba(0,0,0,0.4);
 }
-.login-title { font-size: 1.8rem; font-weight: 800; color: #fff; margin-bottom: 4px; }
-.login-sub   { color: #6b7a99; font-size: 0.95rem; margin-bottom: 28px; }
+.login-card .login-title { font-size: 1.8rem; font-weight: 800; color: #fff !important; margin-bottom: 4px; }
+.login-card .login-sub   { color: #6b7a99 !important; font-size: 0.95rem; margin-bottom: 28px; }
 
 /* Botones de navegacion */
 [data-testid="stSidebar"] .stButton button {
