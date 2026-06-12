@@ -11,7 +11,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-import joblib, io
+import joblib, io, re, unicodedata
 from pathlib import Path
 from datetime import datetime, date
 
@@ -485,6 +485,8 @@ def show_sidebar():
                              "(canal, oferta, frecuencia, script y KPIs)."),
             "vicidial":    ("  Reporte Vicidial", "Genera los 3 reportes diarios de la campaña GRAL "
                              "(Contactabilidad, Recontacto y Tipificación) a partir de los 6 archivos del día."),
+            "campana":     ("  Reporte Campaña", "Reporte diario de campaña: resumen de disposiciones, "
+                             "rendimiento por ejecutivo, promesas de pago, alertas automáticas y plan de acción."),
         }
         if user["rol"] == "admin":
             pages["admin"] = ("  Panel Admin", "Gestión de usuarios (crear, activar/desactivar, "
@@ -1590,6 +1592,378 @@ def page_vicidial():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PAGINA: REPORTE DE CAMPAÑA (resumen, agentes, promesas, alertas, plan)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _norm_txt(s) -> str:
+    s = str(s).upper().strip()
+    s = unicodedata.normalize("NFKD", s)
+    return "".join(c for c in s if not unicodedata.combining(c))
+
+
+def _camp_categoria(status_norm: str) -> str:
+    s = status_norm
+    if "ADMINISTRATIVA" in s:
+        return "administrativa"
+    if "AGENTE NO DISPONIBLE" in s:
+        return "agente_no_disponible"
+    if "PRE-ROUTING DROP" in s or "PRE ROUTING DROP" in s or "PREROUTING" in s:
+        return "drop"
+    if "OCUPADO" in s:
+        return "ocupado"
+    if "NO ANSWER" in s and "AUTODIAL" in s:
+        return "no_answer_auto"
+    if "NO ANSWER" in s or "NO CONTESTA" in s:
+        return "no_contesta"
+    if "BUZON" in s and ("AUTOMATIC" in s or "AUTODIAL" in s):
+        return "buzon_automatico"
+    if "BUZON" in s:
+        return "directo_buzon"
+    if "CUELGA" in s:
+        return "cuelga"
+    if "INCUMPLIDA" in s:
+        return "promesa_incumplida"
+    if "PROMESA" in s and "PAGO" in s:
+        return "promesa_pago"
+    if "NEGATIVA" in s:
+        return "negativa_pago"
+    return "contacto_util"
+
+
+_CAMP_NO_CONTACTABLE = {"ocupado", "no_answer_auto", "no_contesta", "buzon_automatico"}
+_CAMP_BUZON          = {"buzon_automatico", "directo_buzon"}
+_CAMP_PROBLEMA       = {"ocupado", "no_answer_auto", "no_contesta", "buzon_automatico",
+                         "agente_no_disponible", "cuelga", "drop"}
+_CAMP_EXCLUIR_AGENTE = {"administrativa", "ocupado", "no_answer_auto", "buzon_automatico", "drop"}
+
+_RE_CAMP_MONTO = re.compile(r"POR\s*\$?\s*([\d,]+(?:\.\d+)?)", re.IGNORECASE)
+_RE_CAMP_FECHA = re.compile(r"PARA\s+EL\s+(\d{1,2}[\.\-/]\d{1,2}[\.\-/]\d{2,4})", re.IGNORECASE)
+
+
+def _camp_resumen(df: pd.DataFrame) -> dict | None:
+    disp_col  = _vic_find(df, "disposic", "status", "estado")
+    calls_col = _vic_find(df, "llamada", "calls", "cantidad")
+    if not disp_col or not calls_col:
+        return None
+    out = df[[disp_col, calls_col]].copy()
+    out.columns = ["Disposición", "Llamadas"]
+    out["Llamadas"] = pd.to_numeric(out["Llamadas"], errors="coerce").fillna(0)
+    out["_cat"] = out["Disposición"].apply(lambda s: _camp_categoria(_norm_txt(s)))
+    total = out["Llamadas"].sum()
+    no_contactable = out.loc[out["_cat"].isin(_CAMP_NO_CONTACTABLE), "Llamadas"].sum()
+    buzon_total     = out.loc[out["_cat"].isin(_CAMP_BUZON), "Llamadas"].sum()
+    administrativa  = out.loc[out["_cat"] == "administrativa", "Llamadas"].sum()
+    contacto_util   = total - no_contactable - administrativa
+    ocupado         = out.loc[out["_cat"] == "ocupado", "Llamadas"].sum()
+    agente_no_disp  = out.loc[out["_cat"] == "agente_no_disponible", "Llamadas"].sum()
+    return {
+        "tabla": out.sort_values("Llamadas", ascending=False),
+        "total": total, "no_contactable": no_contactable, "buzon_total": buzon_total,
+        "contacto_util": contacto_util, "ocupado": ocupado, "agente_no_disponible": agente_no_disp,
+    }
+
+
+def _camp_detalle_cols(df: pd.DataFrame) -> dict:
+    return {
+        "date":     _vic_find(df, "call_date", "fecha", "date"),
+        "agent":    _vic_find(df, "full_name", "agente", "user", "nombre"),
+        "status":   _vic_find(df, "status_name", "status", "disposic"),
+        "duration": _vic_find(df, "length_in_sec", "duration", "duracion"),
+        "comments": _vic_find(df, "comments", "comentario"),
+        "phone":    _vic_find(df, "phone_number_dialed", "phone", "telefono"),
+        "lead_id":  _vic_find(df, "lead_id"),
+    }
+
+
+def _camp_agentes(df: pd.DataFrame, cols: dict) -> pd.DataFrame:
+    d = df.copy()
+    d["_st"]  = d[cols["status"]].apply(lambda s: _norm_txt(s))
+    d["_cat"] = d["_st"].apply(_camp_categoria)
+    d = d[~d["_cat"].isin(_CAMP_EXCLUIR_AGENTE)]
+    if cols["duration"]:
+        d["_dur"] = pd.to_numeric(d[cols["duration"]], errors="coerce").fillna(0)
+
+    rows = []
+    for agente, sub in d.groupby(cols["agent"]):
+        total         = len(sub)
+        cuelgues      = int((sub["_cat"] == "cuelga").sum())
+        directo_buzon = int((sub["_cat"] == "directo_buzon").sum())
+        no_contestan  = int((sub["_cat"] == "no_contesta").sum())
+        negativas     = int((sub["_cat"] == "negativa_pago").sum())
+        promesas      = int((sub["_cat"] == "promesa_pago").sum())
+        incumplidas   = int((sub["_cat"] == "promesa_incumplida").sum())
+        contacto_util = negativas + promesas + incumplidas + int((sub["_cat"] == "contacto_util").sum())
+        tasa = contacto_util / total * 100 if total else 0
+        avg_dur = sub["_dur"].mean() if cols["duration"] else None
+        rows.append({
+            "Ejecutivo": agente, "Total": total, "Tasa Contacto Util %": round(tasa, 1),
+            "Cuelgues": cuelgues, "Directo Buzon": directo_buzon, "No Contestan": no_contestan,
+            "Negativas Pago": negativas, "Promesas Pago": promesas, "Promesas Incumplidas": incumplidas,
+            "Duracion Prom (seg)": round(avg_dur, 0) if avg_dur is not None else None,
+        })
+    return pd.DataFrame(rows).sort_values("Tasa Contacto Util %", ascending=False).reset_index(drop=True)
+
+
+def _camp_promesas(df: pd.DataFrame, cols: dict):
+    if not cols["comments"] or not cols["status"]:
+        return None, None
+    d = df.copy()
+    d["_st"]  = d[cols["status"]].apply(lambda s: _norm_txt(s))
+    d["_cat"] = d["_st"].apply(_camp_categoria)
+
+    def extract(row):
+        c = str(row[cols["comments"]]) if pd.notna(row[cols["comments"]]) else ""
+        m = _RE_CAMP_MONTO.search(c)
+        f = _RE_CAMP_FECHA.search(c)
+        monto = float(m.group(1).replace(",", "")) if m else None
+        fecha = f.group(1) if f else None
+        return pd.Series({"_monto": monto, "_fecha_compromiso": fecha})
+
+    def build(cat):
+        sub = d[d["_cat"] == cat].copy()
+        if len(sub) == 0:
+            return pd.DataFrame(columns=["Hora", "Ejecutivo", "Telefono", "Lead ID", "Monto",
+                                          "Fecha Compromiso", "Comentario"])
+        extras = sub.apply(extract, axis=1)
+        sub = pd.concat([sub.reset_index(drop=True), extras.reset_index(drop=True)], axis=1)
+        return pd.DataFrame({
+            "Hora":             sub[cols["date"]] if cols["date"] else "",
+            "Ejecutivo":        sub[cols["agent"]] if cols["agent"] else "",
+            "Telefono":         sub[cols["phone"]] if cols["phone"] else "",
+            "Lead ID":          sub[cols["lead_id"]] if cols["lead_id"] else "",
+            "Monto":            sub["_monto"],
+            "Fecha Compromiso": sub["_fecha_compromiso"],
+            "Comentario":       sub[cols["comments"]],
+        })
+
+    return build("promesa_pago"), build("promesa_incumplida")
+
+
+def _camp_export_promesas(df_prom: pd.DataFrame | None, df_incump: pd.DataFrame | None) -> io.BytesIO:
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        for name, sdf in [("Promesas de Pago", df_prom), ("Promesas Incumplidas", df_incump)]:
+            sdf = sdf if sdf is not None else pd.DataFrame()
+            sdf.to_excel(writer, sheet_name=name[:31], index=False)
+            ws = writer.sheets[name[:31]]
+            if len(sdf) == 0:
+                continue
+            header_fill = PatternFill(start_color="1E2535", end_color="1E2535", fill_type="solid")
+            header_font = Font(color="FFFFFF", bold=True)
+            for col_idx, col_name in enumerate(sdf.columns, start=1):
+                cell = ws.cell(row=1, column=col_idx)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center")
+                ws.column_dimensions[get_column_letter(col_idx)].width = max(14, len(str(col_name)) + 2)
+            if "Monto" in sdf.columns:
+                col_idx = list(sdf.columns).index("Monto") + 1
+                col_letter = get_column_letter(col_idx)
+                n = len(sdf)
+                for r in range(2, n + 2):
+                    ws.cell(row=r, column=col_idx).number_format = '"$"#,##0.00'
+                total_row = n + 2
+                label_cell = ws.cell(row=total_row, column=col_idx - 1, value="TOTAL")
+                label_cell.font = Font(bold=True)
+                sum_cell = ws.cell(row=total_row, column=col_idx, value=f"=SUM({col_letter}2:{col_letter}{n+1})")
+                sum_cell.number_format = '"$"#,##0.00'
+                sum_cell.font = Font(bold=True)
+    buf.seek(0)
+    return buf
+
+
+def _camp_alertas(resumen, agentes_df, df_prom, df_incump):
+    alerts = []
+
+    if resumen is not None and resumen["total"] > 0:
+        ocupado_pct = resumen["ocupado"] / resumen["total"] * 100
+        if ocupado_pct > 35:
+            alerts.append(("rojo", "Ocupado automático elevado",
+                f"{ocupado_pct:.1f}% de las llamadas son 'Ocupado automático' (umbral 35%). "
+                "Revisar calidad de la base de datos."))
+        if resumen["agente_no_disponible"] > 100:
+            alerts.append(("naranja", "Agente no disponible elevado",
+                f"{int(resumen['agente_no_disponible'])} casos de 'Agente no disponible' (umbral 100). "
+                "Revisar dial ratio / staffing."))
+
+    if agentes_df is not None and len(agentes_df) > 0:
+        for _, r in agentes_df[agentes_df["Tasa Contacto Util %"] == 0].iterrows():
+            alerts.append(("rojo", f"{r['Ejecutivo']}: 0% de contacto útil",
+                "Revisión individual urgente — sin gestiones efectivas en el día."))
+        cuelga_pct = agentes_df["Cuelgues"] / agentes_df["Total"].replace(0, np.nan) * 100
+        for (_, r), pct in zip(agentes_df.iterrows(), cuelga_pct):
+            if pct and pct > 45:
+                alerts.append(("naranja", f"{r['Ejecutivo']}: cuelgan llamada > 45%",
+                    f"{pct:.1f}% de sus llamadas cuelgan. Revisar script de apertura."))
+
+    if df_incump is not None and len(df_incump) > 0 and "Monto" in df_incump.columns:
+        total_incump = pd.to_numeric(df_incump["Monto"], errors="coerce").fillna(0).sum()
+        if total_incump > 3000:
+            alerts.append(("rojo", "Promesas incumplidas superan $3,000",
+                f"Total en riesgo: ${total_incump:,.2f}. Requiere seguimiento urgente."))
+
+    hoy_variants = {datetime.now().strftime("%d/%m/%y"), datetime.now().strftime("%d/%m/%Y"),
+                    datetime.now().strftime("%d.%m.%y"), datetime.now().strftime("%d-%m-%y")}
+    hoy_norm = {v.replace(".", "/").replace("-", "/") for v in hoy_variants}
+    for label, df_ in [("Promesa de pago", df_prom), ("Promesa incumplida", df_incump)]:
+        if df_ is not None and len(df_) > 0 and "Fecha Compromiso" in df_.columns:
+            fechas_norm = df_["Fecha Compromiso"].astype(str).str.replace(".", "/", regex=False) \
+                                                  .str.replace("-", "/", regex=False)
+            n = fechas_norm.isin(hoy_norm).sum()
+            if n > 0:
+                alerts.append(("naranja", f"{n} '{label}' vencen HOY",
+                    "Contactar al cliente hoy para confirmar el pago."))
+
+    return alerts
+
+
+def _camp_plan(alerts, agentes_df) -> dict:
+    plan = {"alta": [], "media": [], "baja": []}
+    for sev, title, body in alerts:
+        (plan["alta"] if sev == "rojo" else plan["media"]).append(f"**{title}** — {body}")
+    if agentes_df is not None and len(agentes_df) > 0:
+        bajos = agentes_df[agentes_df["Tasa Contacto Util %"] < 25]
+        if len(bajos) > 0:
+            nombres = ", ".join(bajos["Ejecutivo"].astype(str).head(5))
+            plan["media"].append(f"Capacitación / seguimiento para: {nombres} (tasa de contacto útil < 25%).")
+    plan["baja"].append("Revisar listas 'New Lead' sin gestionar y priorizarlas en la próxima jornada.")
+    plan["baja"].append("Si 'Ocupado automático' sigue alto, ajustar horarios de marcación y dial ratio (AMD).")
+    return plan
+
+
+def page_campana():
+    st.markdown("## 📊 Reporte Diario de Campaña")
+    st.markdown("*Resumen de campaña, rendimiento por ejecutivo, promesas de pago, alertas y plan de acción.*")
+    st.divider()
+
+    with st.expander("ℹ️ Cómo se clasifican las disposiciones"):
+        st.markdown("""
+- **No contactables**: Ocupado automático, Buzón automático, No Answer / No contesta.
+- **Buzón total**: Buzón automático + Directo a buzón.
+- **Contacto útil**: Negativa de pago, Promesa de pago, Promesa incumplida y otras gestiones con conversación real.
+- Se **excluyen** del análisis por ejecutivo: Llamada administrativa, Ocupado automático,
+  Buzón automático, No Answer AutoDial y Outbound Pre-Routing Drop.
+        """)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        f_resumen = st.file_uploader("Reporte de Estados de Campaña (Disposición, Llamadas, % )",
+                                      type=None, key="camp_resumen")
+    with c2:
+        f_detalle = st.file_uploader("Reporte Detallado de Llamadas (call_date, full_name, status_name, comments...)",
+                                      type=None, key="camp_detalle")
+
+    if f_resumen is None and f_detalle is None:
+        st.info("Sube al menos uno de los dos reportes para comenzar.")
+        return
+
+    resumen = None
+    agentes_df = None
+    df_prom = df_incump = None
+
+    if f_resumen is not None:
+        try:
+            rdf = _vic_load(f_resumen)
+            resumen = _camp_resumen(rdf)
+            if resumen is None:
+                st.warning("No se reconocieron las columnas de Disposición / Llamadas en el reporte de estados.")
+        except Exception as e:
+            st.warning(f"No se pudo leer el reporte de estados: {e}")
+
+    if f_detalle is not None:
+        try:
+            ddf = _vic_load(f_detalle)
+            cols = _camp_detalle_cols(ddf)
+            if not cols["status"] or not cols["agent"]:
+                st.warning("No se encontraron las columnas 'status_name' / 'full_name' en el reporte detallado.")
+            else:
+                agentes_df = _camp_agentes(ddf, cols)
+                df_prom, df_incump = _camp_promesas(ddf, cols)
+        except Exception as e:
+            st.warning(f"No se pudo leer el reporte detallado: {e}")
+
+    # ── Módulo 1: Resumen de campaña ─────────────────────────────────────────
+    if resumen is not None:
+        st.markdown("#### 1. Resumen de Campaña")
+        k1, k2, k3, k4 = st.columns(4)
+        _vic_kpi(k1, "Total llamadas", f"{int(resumen['total']):,}")
+        _vic_kpi(k2, "% No contactables", _vic_pct(resumen["no_contactable"], resumen["total"]), color="#f59e0b")
+        _vic_kpi(k3, "% Contacto útil", _vic_pct(resumen["contacto_util"], resumen["total"]), color="#22c55e")
+        _vic_kpi(k4, "% Buzón total", _vic_pct(resumen["buzon_total"], resumen["total"]), color="#8b5cf6")
+
+        tabla = resumen["tabla"]
+        colors = ["#ef4444" if c in _CAMP_PROBLEMA else "#3b82f6" for c in tabla["_cat"]]
+        fig = go.Figure(go.Bar(x=tabla["Disposición"], y=tabla["Llamadas"], marker_color=colors))
+        fig.update_layout(paper_bgcolor="#1e2535", plot_bgcolor="#1e2535",
+                          font=dict(color="#aaa", size=11), margin=dict(t=30, b=80, l=10, r=10),
+                          title="Distribución de Disposiciones (rojo = problema operativo)",
+                          xaxis=dict(tickangle=-45))
+        st.plotly_chart(fig, use_container_width=True)
+        st.divider()
+
+    # ── Módulo 2: Rendimiento por ejecutivo ──────────────────────────────────
+    if agentes_df is not None:
+        st.markdown("#### 2. Rendimiento por Ejecutivo")
+
+        def _color_tasa(val):
+            if val >= 50:
+                return "background-color:#16341f;color:#4ade80"
+            if val >= 25:
+                return "background-color:#3a2a00;color:#fbbf24"
+            return "background-color:#3a0f0f;color:#f87171"
+
+        styled = agentes_df.style.map(_color_tasa, subset=["Tasa Contacto Util %"])
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.divider()
+
+    # ── Módulo 3: Promesas de pago ───────────────────────────────────────────
+    if df_prom is not None or df_incump is not None:
+        st.markdown("#### 3. Promesas de Pago y Seguimiento")
+        t1, t2 = st.tabs(["Promesas de Pago", "Promesas Incumplidas"])
+        with t1:
+            if df_prom is not None and len(df_prom) > 0:
+                st.dataframe(df_prom, use_container_width=True, hide_index=True)
+            else:
+                st.info("No se detectaron promesas de pago.")
+        with t2:
+            if df_incump is not None and len(df_incump) > 0:
+                total_incump = pd.to_numeric(df_incump["Monto"], errors="coerce").fillna(0).sum()
+                st.metric("Monto total en riesgo", f"${total_incump:,.2f}")
+                st.dataframe(df_incump, use_container_width=True, hide_index=True)
+            else:
+                st.info("No se detectaron promesas incumplidas.")
+
+        buf = _camp_export_promesas(df_prom, df_incump)
+        st.download_button("⬇️ Descargar Promesas (Excel)", data=buf,
+            file_name=f"promesas_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+        st.divider()
+
+    # ── Módulo 4: Alertas automáticas ────────────────────────────────────────
+    st.markdown("#### 4. Alertas Automáticas")
+    alerts = _camp_alertas(resumen, agentes_df, df_prom, df_incump)
+    if not alerts:
+        st.success("✅ Sin alertas — no se detectaron patrones críticos.")
+    else:
+        color_map = {"rojo": "#dc2626", "naranja": "#f59e0b"}
+        for sev, title, body in alerts:
+            _vic_alert(title, body, color_map[sev])
+    st.divider()
+
+    # ── Módulo 5: Plan de acción ─────────────────────────────────────────────
+    st.markdown("#### 5. Plan de Acción")
+    plan = _camp_plan(alerts, agentes_df)
+    for nivel, label in [("alta", "Prioridad Alta"), ("media", "Prioridad Media"), ("baja", "Prioridad Baja")]:
+        if plan[nivel]:
+            st.markdown(f"**{label}**")
+            for item in plan[nivel]:
+                st.markdown(f"- {item}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ROUTER PRINCIPAL
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1652,6 +2026,7 @@ def main():
         "historial":   page_historial,
         "estrategias": page_estrategias,
         "vicidial":    page_vicidial,
+        "campana":     page_campana,
         "admin":       page_admin,
     }
     routes.get(st.session_state.get("page", "vicidial"), page_vicidial)()
