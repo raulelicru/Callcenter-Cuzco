@@ -1439,6 +1439,34 @@ def _vic_resumen_color(metrica: str) -> str:
     return "#64748b"
 
 
+def _vic_entidad_cards(df: pd.DataFrame, ent_col: str, cols_per_row: int = 4, top: int = 12):
+    """Muestra cada entidad (lista/cartera) como una tarjeta con su % de evasión y % de cuelga,
+    en vez de un gráfico de barras (más fácil de leer con códigos numéricos largos)."""
+    rows = df.sort_values("total", ascending=False).head(top).to_dict("records")
+    for i in range(0, len(rows), cols_per_row):
+        chunk = rows[i:i + cols_per_row]
+        cols = st.columns(len(chunk))
+        for col, r in zip(cols, chunk):
+            evasion = r.get("%_evasion", 0)
+            cuelga  = r.get("%_cuelga", 0)
+            color = "#ef4444" if evasion > 40 else "#f59e0b" if evasion > 20 else "#22c55e"
+            with col:
+                st.markdown(f"""
+                <div style="background:#1a2333;border-radius:10px;padding:14px 16px;
+                            border-left:4px solid {color};margin-bottom:10px">
+                  <div style="color:#8899aa;font-size:11px;text-transform:uppercase;
+                              letter-spacing:.03em">Entidad / Lista</div>
+                  <div style="color:#fff;font-size:18px;font-weight:700;margin-top:2px">{r.get(ent_col, '')}</div>
+                  <div style="color:#6b7a99;font-size:12px;margin-top:6px">{int(r.get('total', 0)):,} llamadas</div>
+                  <div style="display:flex;gap:14px;margin-top:8px">
+                    <div><span style="color:#ef4444;font-weight:700">{evasion:.1f}%</span>
+                      <span style="color:#8899aa;font-size:11px"> evasión</span></div>
+                    <div><span style="color:#f59e0b;font-weight:700">{cuelga:.1f}%</span>
+                      <span style="color:#8899aa;font-size:11px"> cuelga</span></div>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+
+
 def _vic_resumen_cards(df: pd.DataFrame, cols_per_row: int = 5):
     """Renderiza la tabla Resumen como tarjetas con borde de color (mismo estilo que los KPIs),
     en vez de una tabla plana, para que sea más fácil de leer de un vistazo."""
@@ -1911,29 +1939,9 @@ def page_coquimbo():
         if len(contact["por_entidad"]) > 0:
             st.markdown("##### Por Entidad (evasión y cuelga por estado)")
             ent_col = contact["por_entidad"].columns[0]
-            ent_sorted = contact["por_entidad"].sort_values("total", ascending=False).head(12).copy()
-            ent_sorted[ent_col] = ent_sorted[ent_col].astype(str)
-            ent_sorted = ent_sorted.sort_values("%_evasion", ascending=True)
-            fig_ent = go.Figure()
-            fig_ent.add_bar(name="% Evasión", y=ent_sorted[ent_col], x=ent_sorted["%_evasion"],
-                             orientation="h", marker_color="#ef4444",
-                             text=ent_sorted["%_evasion"].map(lambda v: f"{v:.1f}%"), textposition="outside")
-            fig_ent.add_bar(name="% Cuelga en saludo", y=ent_sorted[ent_col], x=ent_sorted["%_cuelga"],
-                             orientation="h", marker_color="#f59e0b",
-                             text=ent_sorted["%_cuelga"].map(lambda v: f"{v:.1f}%"), textposition="outside")
-            fig_ent.update_layout(
-                barmode="group",
-                title=dict(text="Evasión y cuelga por entidad (top 12 listas/carteras con más llamadas)",
-                           font=dict(color="#e2e8f0", size=15)),
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#cbd5e1"), height=420,
-                legend=dict(font=dict(color="#cbd5e1"), orientation="h", y=-0.12),
-                yaxis=dict(type="category", gridcolor="#27314a", title="Entidad (lista/cartera)"),
-                xaxis=dict(gridcolor="#27314a", title="%"),
-                margin=dict(t=50, b=10, l=10, r=30),
-            )
-            st.plotly_chart(fig_ent, use_container_width=True)
-            st.dataframe(contact["por_entidad"], use_container_width=True, hide_index=True)
+            _vic_entidad_cards(contact["por_entidad"], ent_col)
+            with st.expander("Ver tabla completa por entidad"):
+                st.dataframe(contact["por_entidad"], use_container_width=True, hide_index=True)
         if len(hist_contact) > 1:
             st.markdown("##### Histórico Acumulado")
             st.dataframe(hist_contact, use_container_width=True, hide_index=True)
