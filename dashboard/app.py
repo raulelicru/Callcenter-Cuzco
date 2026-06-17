@@ -1263,6 +1263,18 @@ def _vic_find(df: pd.DataFrame, *substrings) -> str | None:
     return None
 
 
+def _vic_fix_mojibake(series: pd.Series) -> pd.Series:
+    """Repara texto UTF-8 mal decodificado como latin-1/cp1252 (p.ej. 'MÃ©xico' -> 'México')."""
+    def fix(v):
+        if isinstance(v, str) and ("Ã" in v or "Â" in v):
+            try:
+                return v.encode("latin-1").decode("utf-8")
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                return v
+        return v
+    return series.map(fix)
+
+
 def _vic_status_norm(series: pd.Series) -> pd.Series:
     s = series.astype(str).str.strip().str.upper()
     s = s.str.replace(r"\.0$", "", regex=True)
@@ -1291,6 +1303,7 @@ def _vic_export_cols(df: pd.DataFrame, monto_subs=("postal_code",), estado_subs=
         "monto":        _vic_find(df, *monto_subs),
         "estado_deudor":_vic_find(df, *estado_subs),
         "lead_id":      _vic_find(df, "lead_id"),
+        "canal":        _vic_find(df, "security_phrase"),
     }
 
 
@@ -1341,6 +1354,7 @@ def _vic_tablero_contactabilidad(df: pd.DataFrame, c: dict, fecha, promesa=None,
     por_entidad = pd.DataFrame()
     if c["entidad"]:
         ent = df.copy()
+        ent[c["entidad"]] = _vic_fix_mojibake(ent[c["entidad"]])
         ent["_evasion"]  = ent["_st"].isin(_VIC_NOANSWER | _VIC_MACHINE)
         ent["_saludo"]   = ent["_st"] == saludo_st
         ent["_humano"]   = ent["_st"].isin(humanos_st)
@@ -1354,12 +1368,32 @@ def _vic_tablero_contactabilidad(df: pd.DataFrame, c: dict, fecha, promesa=None,
         ).reset_index()
         por_entidad["%_evasion"] = (por_entidad["evasion"] / por_entidad["total"] * 100).round(1)
         por_entidad["%_cuelga"]  = (por_entidad["cuelga_saludo"] / por_entidad["total"] * 100).round(1)
+        por_entidad["%_humanos"] = (por_entidad["humanos"] / por_entidad["total"] * 100).round(1)
+        por_entidad["%_promesas"] = (por_entidad["promesas"] / por_entidad["total"] * 100).round(1)
 
     return {
         "resumen": resumen, "por_estado": por_estado, "por_entidad": por_entidad,
         "kpis": {"total": total, "humanos": len(humanos), "promesas": len(promesas),
                  "saludo": len(saludo), "monto": float(monto_total), "gestion": len(gestion)},
     }
+
+
+def _vic_canal_crecimiento(df: pd.DataFrame, canal_col: str, humanos_st) -> pd.DataFrame:
+    """Reporte por canal de crecimiento (columna AC / security_phrase): cuántas llamadas fueron
+    atendidas por contacto humano vs. resueltas por el sistema (IVR/máquina), por canal."""
+    if not canal_col:
+        return pd.DataFrame()
+    can = df.copy()
+    can[canal_col] = _vic_fix_mojibake(can[canal_col])
+    can["_humano"] = can["_st"].isin(humanos_st)
+    rep = can.groupby(canal_col).agg(
+        total=("_st", "count"),
+        humano=("_humano", "sum"),
+    ).reset_index()
+    rep["sistema"] = rep["total"] - rep["humano"]
+    rep["%_humano"] = (rep["humano"] / rep["total"] * 100).round(1)
+    rep["%_sistema"] = (rep["sistema"] / rep["total"] * 100).round(1)
+    return rep.sort_values("total", ascending=False)
 
 
 def _vic_control_recontacto(df: pd.DataFrame, c: dict, fecha, promesa=None, labels=None) -> dict | None:
@@ -1492,30 +1526,59 @@ def _vic_estado_cards(df: pd.DataFrame, promesa, saludo_st, cols_per_row: int = 
                 </div>""", unsafe_allow_html=True)
 
 
-def _vic_entidad_cards(df: pd.DataFrame, ent_col: str, cols_per_row: int = 4, top: int = 12):
-    """Muestra cada entidad (lista/cartera) como una tarjeta con su % de evasión y % de cuelga,
+def _vic_entidad_cards(df: pd.DataFrame, ent_col: str, cols_per_row: int = 4, top: int = 12,
+                        label: str = "Entidad / Lista"):
+    """Muestra cada entidad/estado como una tarjeta con % de llamadas humano y % de promesas de pago,
     en vez de un gráfico de barras (más fácil de leer con códigos numéricos largos)."""
     rows = df.sort_values("total", ascending=False).head(top).to_dict("records")
     for i in range(0, len(rows), cols_per_row):
         chunk = rows[i:i + cols_per_row]
         cols = st.columns(len(chunk))
         for col, r in zip(cols, chunk):
-            evasion = r.get("%_evasion", 0)
-            cuelga  = r.get("%_cuelga", 0)
-            color = "#ef4444" if evasion > 40 else "#f59e0b" if evasion > 20 else "#22c55e"
+            humanos  = r.get("%_humanos", 0)
+            promesas = r.get("%_promesas", 0)
+            color = "#22c55e" if promesas > 20 else "#f59e0b" if promesas > 8 else "#ef4444"
             with col:
                 st.markdown(f"""
                 <div style="background:#1a2333;border-radius:10px;padding:14px 16px;
                             border-left:4px solid {color};margin-bottom:10px">
                   <div style="color:#8899aa;font-size:11px;text-transform:uppercase;
-                              letter-spacing:.03em">Entidad / Lista</div>
+                              letter-spacing:.03em">{label}</div>
                   <div style="color:#fff;font-size:18px;font-weight:700;margin-top:2px">{r.get(ent_col, '')}</div>
                   <div style="color:#6b7a99;font-size:12px;margin-top:6px">{int(r.get('total', 0)):,} llamadas</div>
                   <div style="display:flex;gap:14px;margin-top:8px">
-                    <div><span style="color:#ef4444;font-weight:700">{evasion:.1f}%</span>
-                      <span style="color:#8899aa;font-size:11px"> evasión</span></div>
-                    <div><span style="color:#f59e0b;font-weight:700">{cuelga:.1f}%</span>
-                      <span style="color:#8899aa;font-size:11px"> cuelga</span></div>
+                    <div><span style="color:#3b82f6;font-weight:700">{humanos:.1f}%</span>
+                      <span style="color:#8899aa;font-size:11px"> humano</span></div>
+                    <div><span style="color:#22c55e;font-weight:700">{promesas:.1f}%</span>
+                      <span style="color:#8899aa;font-size:11px"> promesa</span></div>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+
+
+def _vic_canal_cards(df: pd.DataFrame, canal_col: str, cols_per_row: int = 4, top: int = 12):
+    """Muestra cada canal de crecimiento (columna AC / security_phrase) como tarjeta con
+    % atendido por humano vs. % resuelto por sistema."""
+    rows = df.sort_values("total", ascending=False).head(top).to_dict("records")
+    for i in range(0, len(rows), cols_per_row):
+        chunk = rows[i:i + cols_per_row]
+        cols = st.columns(len(chunk))
+        for col, r in zip(cols, chunk):
+            humano  = r.get("%_humano", 0)
+            sistema = r.get("%_sistema", 0)
+            color = "#3b82f6" if humano > 50 else "#8b5cf6"
+            with col:
+                st.markdown(f"""
+                <div style="background:#1a2333;border-radius:10px;padding:14px 16px;
+                            border-left:4px solid {color};margin-bottom:10px">
+                  <div style="color:#8899aa;font-size:11px;text-transform:uppercase;
+                              letter-spacing:.03em">Canal de Crecimiento</div>
+                  <div style="color:#fff;font-size:18px;font-weight:700;margin-top:2px">{r.get(canal_col, '')}</div>
+                  <div style="color:#6b7a99;font-size:12px;margin-top:6px">{int(r.get('total', 0)):,} llamadas</div>
+                  <div style="display:flex;gap:14px;margin-top:8px">
+                    <div><span style="color:#3b82f6;font-weight:700">{humano:.1f}%</span>
+                      <span style="color:#8899aa;font-size:11px"> humano</span></div>
+                    <div><span style="color:#8b5cf6;font-weight:700">{sistema:.1f}%</span>
+                      <span style="color:#8899aa;font-size:11px"> sistema</span></div>
                   </div>
                 </div>""", unsafe_allow_html=True)
 
@@ -1872,6 +1935,7 @@ def page_coquimbo():
                                                 saludo_st=_COQ_SALUDO, humanos_st=_COQ_HUMANOS, labels=labels_full)
         recont  = _vic_control_recontacto(df, c, fecha, promesa=_COQ_PROMESA, labels=labels_full)
         tipif   = _vic_tipificacion_gestion(df, c, fecha, labels=labels_full)
+        canal_report = _vic_canal_crecimiento(df, c["canal"], _COQ_HUMANOS)
 
         hist_contact = _vic_append_historico(f_contact_prev, contact["resumen"])
         hist_tipif   = _vic_append_historico(f_tipif_prev, tipif["resumen"])
@@ -1998,11 +2062,16 @@ def page_coquimbo():
         with st.expander("Ver tabla completa por estatus"):
             st.dataframe(contact["por_estado"], use_container_width=True, hide_index=True)
         if len(contact["por_entidad"]) > 0:
-            st.markdown("##### Por Estado (evasión y cuelga por estado geográfico)")
+            st.markdown("##### Por Estado (llamadas humano vs. promesas de pago por estado geográfico)")
             ent_col = contact["por_entidad"].columns[0]
-            _vic_entidad_cards(contact["por_entidad"], ent_col)
+            _vic_entidad_cards(contact["por_entidad"], ent_col, label="Estado")
             with st.expander("Ver tabla completa por estado"):
                 st.dataframe(contact["por_entidad"], use_container_width=True, hide_index=True)
+        if len(canal_report) > 0:
+            st.markdown("##### Por Canal de Crecimiento (contacto humano vs. sistema)")
+            _vic_canal_cards(canal_report, c["canal"])
+            with st.expander("Ver tabla completa por canal"):
+                st.dataframe(canal_report, use_container_width=True, hide_index=True)
         if len(hist_contact) > 1:
             st.markdown("##### Histórico Acumulado")
             st.dataframe(hist_contact, use_container_width=True, hide_index=True)
