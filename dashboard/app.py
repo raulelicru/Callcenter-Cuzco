@@ -41,6 +41,17 @@ _VIC_GRAL_LABELS    = {
     "21": "Promesa de pago (alterna)",
 }
 
+# Reglas de la campaña Coquimbo (mismos 3 archivos, otra tipificación interna)
+_COQ_PROMESA = {"1B", "1O"}
+_COQ_SALUDO  = "1L"
+_COQ_HUMANOS = {"2", "4", "6", "1B", "1C", "1D", "1E", "1F", "1G", "1H", "1I", "1J", "1K",
+                "1L", "1N", "1O", "2B", "2C", "2D", "2E", "2F", "3C", "3D", "3E"}
+_COQ_LABELS  = {
+    "1L": "Cuelga en saludo (rechazo temprano)",
+    "1B": "Promesa de pago",
+    "1O": "Promesa de pago (alterna)",
+}
+
 from database import (
     init_db, get_clientes_by_ids, upsert_clientes_batch,
     log_carga, get_cargas_historico, get_metricas_globales, get_all_clientes_df,
@@ -483,7 +494,10 @@ def show_sidebar():
                              "(fecha, usuario, registros nuevos y actualizados)."),
             "estrategias": ("  Estrategias", "Estrategias de cobranza recomendadas por segmento "
                              "(canal, oferta, frecuencia, script y KPIs)."),
-            "vicidial":    ("  Reporte Vicidial", "Genera los 3 reportes diarios de la campaña GRAL "
+            "vicidial":    ("  Reporte Coquimbo", "Genera los 3 reportes diarios de la campaña Coquimbo "
+                             "(Contactabilidad, Recontacto y Tipificación) a partir de los 3 archivos del día.")
+                           if st.session_state.get("empresa_nombre") == "Coquimbo" else
+                           ("  Reporte Vicidial", "Genera los 3 reportes diarios de la campaña GRAL "
                              "(Contactabilidad, Recontacto y Tipificación) a partir de los 6 archivos del día."),
             "campana":     ("  Reporte Campaña", "Reporte diario de campaña: resumen de disposiciones, "
                              "rendimiento por ejecutivo, promesas de pago, alertas automáticas y plan de acción."),
@@ -1205,15 +1219,15 @@ def _vic_extract_date_from_name(name: str):
     return None
 
 
-def _vic_export_cols(df: pd.DataFrame) -> dict:
+def _vic_export_cols(df: pd.DataFrame, monto_subs=("postal_code",), estado_subs=("first_name",)) -> dict:
     return {
         "status":       _vic_find(df, "status"),
         "phone":        _vic_find(df, "phone_number", "phone", "telefono"),
         "date":         _vic_find(df, "call_date", "date", "fecha"),
         "agent":        _vic_find(df, "user", "agent", "agente"),
         "entidad":      _vic_find(df, "list_id", "campaign_id", "entidad"),
-        "monto":        _vic_find(df, "postal_code"),
-        "estado_deudor":_vic_find(df, "first_name"),
+        "monto":        _vic_find(df, *monto_subs),
+        "estado_deudor":_vic_find(df, *estado_subs),
         "lead_id":      _vic_find(df, "lead_id"),
     }
 
@@ -1227,12 +1241,17 @@ def _vic_filter_jornada(df: pd.DataFrame, c: dict, fecha):
     return df[mask], True
 
 
-def _vic_tablero_contactabilidad(df: pd.DataFrame, c: dict, fecha) -> dict:
+def _vic_tablero_contactabilidad(df: pd.DataFrame, c: dict, fecha, promesa=None, saludo_st=None,
+                                  humanos_st=None, labels=None) -> dict:
+    promesa    = promesa if promesa is not None else _VIC_GRAL_PROMESA
+    saludo_st  = saludo_st if saludo_st is not None else _VIC_GRAL_SALUDO
+    humanos_st = humanos_st if humanos_st is not None else _VIC_GRAL_HUMANOS
+    labels     = labels if labels is not None else _VIC_GRAL_LABELS
     total = len(df)
-    humanos  = df[df["_st"].isin(_VIC_GRAL_HUMANOS)]
-    promesas = df[df["_st"].isin(_VIC_GRAL_PROMESA)]
-    saludo   = df[df["_st"] == _VIC_GRAL_SALUDO]
-    gestion  = humanos[humanos["_st"] != _VIC_GRAL_SALUDO]
+    humanos  = df[df["_st"].isin(humanos_st)]
+    promesas = df[df["_st"].isin(promesa)]
+    saludo   = df[df["_st"] == saludo_st]
+    gestion  = humanos[humanos["_st"] != saludo_st]
 
     monto_total = 0.0
     if c["monto"]:
@@ -1252,7 +1271,7 @@ def _vic_tablero_contactabilidad(df: pd.DataFrame, c: dict, fecha) -> dict:
     })
 
     por_estado = df["_st"].value_counts().rename_axis("Status").reset_index(name="Llamadas")
-    por_estado["Descripción"] = por_estado["Status"].map(_VIC_GRAL_LABELS).fillna(
+    por_estado["Descripción"] = por_estado["Status"].map(labels).fillna(
         por_estado["Status"].map(_VIC_STATUS_LABELS)).fillna("—")
     por_estado["%"] = (por_estado["Llamadas"] / total * 100).round(2) if total else 0
 
@@ -1260,9 +1279,9 @@ def _vic_tablero_contactabilidad(df: pd.DataFrame, c: dict, fecha) -> dict:
     if c["entidad"]:
         ent = df.copy()
         ent["_evasion"]  = ent["_st"].isin(_VIC_NOANSWER | _VIC_MACHINE)
-        ent["_saludo"]   = ent["_st"] == _VIC_GRAL_SALUDO
-        ent["_humano"]   = ent["_st"].isin(_VIC_GRAL_HUMANOS)
-        ent["_promesa"]  = ent["_st"].isin(_VIC_GRAL_PROMESA)
+        ent["_saludo"]   = ent["_st"] == saludo_st
+        ent["_humano"]   = ent["_st"].isin(humanos_st)
+        ent["_promesa"]  = ent["_st"].isin(promesa)
         por_entidad = ent.groupby(c["entidad"]).agg(
             total=("_st", "count"),
             humanos=("_humano", "sum"),
@@ -1280,7 +1299,9 @@ def _vic_tablero_contactabilidad(df: pd.DataFrame, c: dict, fecha) -> dict:
     }
 
 
-def _vic_control_recontacto(df: pd.DataFrame, c: dict, fecha) -> dict | None:
+def _vic_control_recontacto(df: pd.DataFrame, c: dict, fecha, promesa=None, labels=None) -> dict | None:
+    promesa = promesa if promesa is not None else _VIC_GRAL_PROMESA
+    labels  = labels if labels is not None else _VIC_GRAL_LABELS
     key = c["phone"] or c["lead_id"]
     if not key:
         return None
@@ -1291,8 +1312,8 @@ def _vic_control_recontacto(df: pd.DataFrame, c: dict, fecha) -> dict | None:
         res["monto"] = pd.to_numeric(g[c["monto"]].last(), errors="coerce").fillna(0).values
     if c["estado_deudor"]:
         res["estado_deudor"] = g[c["estado_deudor"]].last().values
-    res["requiere_recontacto"] = ~res["ultimo_estado"].isin(_VIC_GRAL_PROMESA)
-    res["descripcion_estado"]  = res["ultimo_estado"].map(_VIC_GRAL_LABELS).fillna(
+    res["requiere_recontacto"] = ~res["ultimo_estado"].isin(promesa)
+    res["descripcion_estado"]  = res["ultimo_estado"].map(labels).fillna(
         res["ultimo_estado"].map(_VIC_STATUS_LABELS)).fillna("—")
 
     con_promesa = int((~res["requiere_recontacto"]).sum())
@@ -1306,11 +1327,12 @@ def _vic_control_recontacto(df: pd.DataFrame, c: dict, fecha) -> dict | None:
             "kpis": {"total_leads": len(res), "promesas": con_promesa, "pendientes": pendientes}}
 
 
-def _vic_tipificacion_gestion(df: pd.DataFrame, c: dict, fecha) -> dict:
+def _vic_tipificacion_gestion(df: pd.DataFrame, c: dict, fecha, labels=None) -> dict:
+    labels = labels if labels is not None else _VIC_GRAL_LABELS
     total = len(df)
     g = df.groupby("_st").size().rename("llamadas").reset_index().rename(columns={"_st": "Status"})
     g["%"] = (g["llamadas"] / total * 100).round(2) if total else 0
-    g["Descripción"] = g["Status"].map(_VIC_GRAL_LABELS).fillna(g["Status"].map(_VIC_STATUS_LABELS)).fillna("—")
+    g["Descripción"] = g["Status"].map(labels).fillna(g["Status"].map(_VIC_STATUS_LABELS)).fillna("—")
     if c["monto"]:
         montos = df.groupby("_st")[c["monto"]].apply(lambda s: pd.to_numeric(s, errors="coerce").fillna(0).sum())
         g["monto_total"] = g["Status"].map(montos).fillna(0).round(2)
@@ -1586,6 +1608,211 @@ def page_vicidial():
         })
         st.download_button("⬇️ Tipificacion_Gestion_GRAL", data=buf3,
             file_name=f"Tipificacion_Gestion_GRAL_{fecha_str}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+
+    return
+
+
+def page_coquimbo():
+    st.markdown("## 📞 Reportes Diarios — Campaña Coquimbo")
+    st.markdown("*Sube los 3 archivos del día y genera los 3 reportes actualizados: "
+                 "Tablero de Contactabilidad, Control de Recontacto y Tipificación de Gestión.*")
+    st.divider()
+
+    with st.expander("ℹ️ Reglas aplicadas en el cálculo"):
+        st.markdown("""
+- **Promesa de pago** = status `1B` + `1O` (siempre se suman ambos).
+- **Status `1L`** = cuelga en saludo (rechazo temprano), no cuenta como gestión.
+- **Humanos** = status `2, 4, 6, 1B, 1C, 1D, 1E, 1F, 1G, 1H, 1I, 1J, 1K, 1L, 1N, 1O, 2B, 2C, 2D, 2E, 2F, 3C, 3D, 3E`
+  → hoja *Por Entidad* (evasión y cuelga por estado, agrupado por lista/cartera).
+- **Sábado** = media jornada (8 AM–12 PM); se compara sábado contra sábado.
+- El día nuevo se agrega al **acumulado (Histórico)** de cada reporte, leyendo el tablero del día anterior.
+- **Monto comprometido** sale del campo `last_name` (campo reutilizado del export). El campo `first_name`
+  trae el ID del deudor y no se usa para tipificación.
+        """)
+
+    st.markdown("#### 1. Archivos frescos (jornada del día) — 3 archivos")
+    f_amd     = st.file_uploader("AST_AMD_log_report (.csv)", type=None, key="coq_amd")
+    f_vdad    = st.file_uploader("Estatus de llamadas / AST_VDADstats (.csv)", type=None, key="coq_vdad")
+    f_export  = st.file_uploader(
+        "Estados VICIdial — EXPORT_CALL_REPORT (.txt/.csv)  ⭐ insumo principal",
+        type=None, key="coq_export")
+
+    st.markdown("#### 2. Tableros del día anterior (acumulado) — 3 archivos")
+    f_contact_prev    = st.file_uploader("Tablero_Contactabilidad_Coquimbo (.xlsx)", type=None, key="coq_contact_prev")
+    f_recontacto_prev = st.file_uploader("Control_Recontacto_Coquimbo (.xlsx)", type=None, key="coq_recontacto_prev")
+    f_tipif_prev      = st.file_uploader("Tipificacion_Gestion_Coquimbo (.xlsx)", type=None, key="coq_tipif_prev")
+
+    st.divider()
+
+    if f_export is None:
+        st.info("Sube al menos el **export de Estados VICIdial** para generar los 3 reportes.")
+        return
+
+    if not st.button("🚀 Generar Reportes", type="primary"):
+        return
+
+    with st.spinner("Procesando..."):
+        try:
+            df = _vic_load(f_export)
+        except Exception as e:
+            st.error(f"No se pudo leer el export: {e}")
+            return
+
+        c = _vic_export_cols(df, monto_subs=("last_name",), estado_subs=("first_name",))
+        if not c["status"]:
+            st.error("No se encontró la columna **status** en el export. "
+                     "Verifica que el archivo incluya esa columna.")
+            return
+        df["_st"] = _vic_status_norm(df[c["status"]])
+
+        fecha = _vic_extract_date_from_name(f_export.name) or date.today()
+        df, es_sabado = _vic_filter_jornada(df, c, fecha)
+        if es_sabado:
+            st.info("📅 Detectado **sábado** — se filtró la jornada a 8:00–12:00 (media jornada). "
+                    "Compara este reporte contra el sábado anterior en la hoja *Histórico*.")
+
+        contact = _vic_tablero_contactabilidad(df, c, fecha, promesa=_COQ_PROMESA,
+                                                saludo_st=_COQ_SALUDO, humanos_st=_COQ_HUMANOS, labels=_COQ_LABELS)
+        recont  = _vic_control_recontacto(df, c, fecha, promesa=_COQ_PROMESA, labels=_COQ_LABELS)
+        tipif   = _vic_tipificacion_gestion(df, c, fecha, labels=_COQ_LABELS)
+
+        hist_contact = _vic_append_historico(f_contact_prev, contact["resumen"])
+        hist_tipif   = _vic_append_historico(f_tipif_prev, tipif["resumen"])
+        hist_recont  = _vic_append_historico(f_recontacto_prev, recont["resumen"]) if recont else None
+
+    # ── KPIs ──────────────────────────────────────────────────────────────────
+    st.markdown("#### Resumen del Día")
+    k1, k2, k3, k4, k5 = st.columns(5)
+    kp = contact["kpis"]
+    cr_color = "#27ae60" if kp["humanos"]/kp["total"] >= 0.35 else "#f39c12" if kp["humanos"]/kp["total"] >= 0.20 else "#e74c3c"
+    _vic_kpi(k1, "Total llamadas", f"{kp['total']:,}")
+    _vic_kpi(k2, "Contactabilidad (humanos)", _vic_pct(kp["humanos"], kp["total"]), color=cr_color)
+    _vic_kpi(k3, "Promesas de pago (1B+1O)", f"{kp['promesas']:,}")
+    _vic_kpi(k4, "Monto comprometido", f"$ {kp['monto']:,.2f}")
+    sal_color = "#e74c3c" if kp["saludo"]/kp["total"] > 0.40 else "#f39c12" if kp["saludo"]/kp["total"] > 0.25 else "#27ae60"
+    _vic_kpi(k5, "Cuelga en saludo (1L)", _vic_pct(kp["saludo"], kp["total"]), color=sal_color)
+
+    # ── Alertas / tendencia ──────────────────────────────────────────────────
+    st.markdown("#### Alertas y Tendencia")
+    saludo_rate = kp["saludo"] / kp["total"] if kp["total"] else 0
+    if saludo_rate > 0.40:
+        _vic_alert("Evasión / cuelga en saludo CRÍTICA",
+                   f"{saludo_rate*100:.1f}% de las llamadas cuelgan en el saludo (status 1L). "
+                   "Revisar guion de apertura, horario de marcado y calidad de la base.", "#dc2626")
+    elif saludo_rate > 0.25:
+        _vic_alert("Cuelga en saludo elevado",
+                   f"{saludo_rate*100:.1f}% cuelgan en el saludo. Vigilar tendencia.", "#f59e0b")
+
+    if f_vdad is not None:
+        try:
+            vdf = _vic_load(f_vdad)
+            drop_col  = _vic_find(vdf, "drop")
+            calls_col = _vic_find(vdf, "call")
+            if drop_col and calls_col:
+                drops = pd.to_numeric(vdf[drop_col], errors="coerce").fillna(0).sum()
+                calls = pd.to_numeric(vdf[calls_col], errors="coerce").fillna(0).sum()
+                if calls > 0:
+                    drop_rate = drops / calls * 100
+                    if drop_rate > 5:
+                        _vic_alert("DROP / sobre-marcado elevado",
+                                   f"Tasa de DROP {drop_rate:.1f}% según el reporte de estatus de llamadas. "
+                                   "Reducir nivel de marcado o aumentar agentes disponibles.", "#dc2626")
+                    elif drop_rate > 3:
+                        _vic_alert("DROP por encima del objetivo",
+                                   f"Tasa de DROP {drop_rate:.1f}% (meta < 3%).", "#f59e0b")
+        except Exception:
+            pass
+
+    trend_lines = []
+    for metric, label, fmt in [
+        ("% Contactabilidad", "Contactabilidad", "{}"),
+        ("% Cuelga en saludo", "Cuelga en saludo", "{}"),
+        ("Promesas de pago (04+21)", "Promesas de pago", "{:.0f}"),
+        ("Monto comprometido (S/)", "Monto comprometido ($)", "{:.2f}"),
+    ]:
+        line = _vic_trend_line(hist_contact, metric, label, fmt)
+        if line:
+            trend_lines.append(line)
+
+    if trend_lines:
+        st.markdown("**Tendencia vs. día anterior:**")
+        for line in trend_lines:
+            st.markdown(f"- {line}")
+    else:
+        st.caption("Sube el Tablero_Contactabilidad_Coquimbo del día anterior para ver la tendencia.")
+
+    # ── Detalle de los 3 reportes ────────────────────────────────────────────
+    st.markdown("#### Detalle de los Reportes")
+    tab1, tab2, tab3 = st.tabs(["Tablero de Contactabilidad", "Control de Recontacto", "Tipificación de Gestión"])
+
+    with tab1:
+        st.dataframe(contact["resumen"], use_container_width=True, hide_index=True)
+        st.markdown("##### Por Estado")
+        st.dataframe(contact["por_estado"], use_container_width=True, hide_index=True)
+        if len(contact["por_entidad"]) > 0:
+            st.markdown("##### Por Entidad (evasión y cuelga por estado)")
+            st.dataframe(contact["por_entidad"], use_container_width=True, hide_index=True)
+        if len(hist_contact) > 1:
+            st.markdown("##### Histórico Acumulado")
+            st.dataframe(hist_contact, use_container_width=True, hide_index=True)
+
+    with tab2:
+        if recont is None:
+            st.info("No se detectó columna de teléfono / lead_id en el export para generar este reporte.")
+        else:
+            st.dataframe(recont["resumen"], use_container_width=True, hide_index=True)
+            st.markdown("##### Detalle por Lead")
+            st.dataframe(recont["detalle"], use_container_width=True, hide_index=True)
+            if hist_recont is not None and len(hist_recont) > 1:
+                st.markdown("##### Histórico Acumulado")
+                st.dataframe(hist_recont, use_container_width=True, hide_index=True)
+
+    with tab3:
+        st.dataframe(tipif["resumen"], use_container_width=True, hide_index=True)
+        st.markdown("##### Por Tipo de Gestión (Status)")
+        st.dataframe(tipif["por_status"], use_container_width=True, hide_index=True)
+        if len(tipif["por_estado_deudor"]) > 0:
+            st.markdown("##### Por ID de Deudor (referencia)")
+            st.dataframe(tipif["por_estado_deudor"], use_container_width=True, hide_index=True)
+        if len(hist_tipif) > 1:
+            st.markdown("##### Histórico Acumulado")
+            st.dataframe(hist_tipif, use_container_width=True, hide_index=True)
+
+    # ── Exportar los 3 reportes ──────────────────────────────────────────────
+    st.divider()
+    st.markdown("#### Descargar Reportes Actualizados")
+    fecha_str = fecha.strftime("%Y%m%d")
+    e1, e2, e3 = st.columns(3)
+
+    with e1:
+        buf1 = _vic_write_excel({
+            "Resumen": contact["resumen"], "Por Estado": contact["por_estado"],
+            "Por Entidad": contact["por_entidad"], "Histórico": hist_contact,
+        })
+        st.download_button("⬇️ Tablero_Contactabilidad_Coquimbo", data=buf1,
+            file_name=f"Tablero_Contactabilidad_Coquimbo_{fecha_str}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+
+    with e2:
+        if recont is not None:
+            buf2 = _vic_write_excel({
+                "Resumen": recont["resumen"], "Detalle": recont["detalle"],
+                "Histórico": hist_recont,
+            })
+            st.download_button("⬇️ Control_Recontacto_Coquimbo", data=buf2,
+                file_name=f"Control_Recontacto_Coquimbo_{fecha_str}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+        else:
+            st.caption("No disponible (falta columna de teléfono/lead_id).")
+
+    with e3:
+        buf3 = _vic_write_excel({
+            "Resumen": tipif["resumen"], "Por Status": tipif["por_status"],
+            "Por ID Deudor": tipif["por_estado_deudor"], "Histórico": hist_tipif,
+        })
+        st.download_button("⬇️ Tipificacion_Gestion_Coquimbo", data=buf3,
+            file_name=f"Tipificacion_Gestion_Coquimbo_{fecha_str}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
 
     return
@@ -2025,7 +2252,7 @@ def main():
         "analisis":    page_analisis,
         "historial":   page_historial,
         "estrategias": page_estrategias,
-        "vicidial":    page_vicidial,
+        "vicidial":    page_coquimbo if st.session_state.get("empresa_nombre") == "Coquimbo" else page_vicidial,
         "campana":     page_campana,
         "admin":       page_admin,
     }
