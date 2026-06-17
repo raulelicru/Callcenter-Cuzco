@@ -1645,11 +1645,39 @@ def page_vicidial():
     return
 
 
+def _coq_section(icon, title, subtitle=""):
+    st.markdown(f"""
+    <div style="margin:1.6rem 0 0.8rem 0;padding:0.9rem 1.2rem;border-radius:12px;
+                background:linear-gradient(90deg,#1e2a4a 0%,#172033 100%);
+                border-left:5px solid #3b82f6;">
+        <div style="font-size:1.15rem;font-weight:800;color:#fff">{icon} {title}</div>
+        {f'<div style="font-size:0.85rem;color:#8aa2c8;margin-top:2px">{subtitle}</div>' if subtitle else ''}
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def _coq_status_color(status, promesa, saludo_st):
+    s = str(status).upper()
+    if s in promesa:
+        return "#22c55e"
+    if s == str(saludo_st).upper() or s in {"AB", "DROP", "PDROP", "NA"}:
+        return "#ef4444"
+    if s in {"AA"}:
+        return "#f59e0b"
+    return "#3b82f6"
+
+
 def page_coquimbo():
-    st.markdown("## 📞 Reportes Diarios — Campaña Coquimbo")
-    st.markdown("*Sube los 3 archivos del día y genera los 3 reportes actualizados: "
-                 "Tablero de Contactabilidad, Control de Recontacto y Tipificación de Gestión.*")
-    st.divider()
+    st.markdown("""
+    <div style="padding:1.4rem 1.6rem;border-radius:16px;margin-bottom:0.8rem;
+                background:linear-gradient(120deg,#0ea5e9 0%,#2563eb 55%,#7c3aed 100%);">
+        <div style="font-size:1.9rem;font-weight:800;color:#fff">📞 Reportes Diarios — Campaña Coquimbo</div>
+        <div style="font-size:0.95rem;color:#e0e7ff;margin-top:4px">
+            Sube los 3 archivos del día y genera el análisis completo: contactabilidad, recontacto y
+            tipificación de gestión, con gráficas y tendencia día a día.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     with st.expander("ℹ️ Reglas aplicadas en el cálculo"):
         st.markdown("""
@@ -1663,14 +1691,14 @@ def page_coquimbo():
   trae el ID del deudor y no se usa para tipificación.
         """)
 
-    st.markdown("#### 1. Archivos frescos (jornada del día) — 3 archivos")
+    _coq_section("📁", "1. Archivos frescos del día", "3 archivos de la jornada")
     f_amd     = st.file_uploader("AST_AMD_log_report (.csv)", type=None, key="coq_amd")
     f_vdad    = st.file_uploader("Estatus de llamadas / AST_VDADstats (.csv)", type=None, key="coq_vdad")
     f_export  = st.file_uploader(
         "Estados VICIdial — EXPORT_CALL_REPORT (.txt/.csv)  ⭐ insumo principal",
         type=None, key="coq_export")
 
-    st.markdown("#### 2. Tableros del día anterior (acumulado) — 3 archivos")
+    _coq_section("🗄️", "2. Tableros del día anterior", "3 archivos del acumulado histórico")
     f_contact_prev    = st.file_uploader("Tablero_Contactabilidad_Coquimbo (.xlsx)", type=None, key="coq_contact_prev")
     f_recontacto_prev = st.file_uploader("Control_Recontacto_Coquimbo (.xlsx)", type=None, key="coq_recontacto_prev")
     f_tipif_prev      = st.file_uploader("Tipificacion_Gestion_Coquimbo (.xlsx)", type=None, key="coq_tipif_prev")
@@ -1733,19 +1761,64 @@ def page_coquimbo():
         hist_recont  = _vic_append_historico(f_recontacto_prev, recont["resumen"]) if recont else None
 
     # ── KPIs ──────────────────────────────────────────────────────────────────
-    st.markdown("#### Resumen del Día")
+    _coq_section("📊", "Resumen del Día", f"Jornada del {fecha.strftime('%d/%m/%Y')}"
+                  + (" · sábado, media jornada" if es_sabado else ""))
     k1, k2, k3, k4, k5 = st.columns(5)
     kp = contact["kpis"]
     cr_color = "#27ae60" if kp["humanos"]/kp["total"] >= 0.35 else "#f39c12" if kp["humanos"]/kp["total"] >= 0.20 else "#e74c3c"
     _vic_kpi(k1, "Total llamadas", f"{kp['total']:,}")
     _vic_kpi(k2, "Contactabilidad (humanos)", _vic_pct(kp["humanos"], kp["total"]), color=cr_color)
-    _vic_kpi(k3, "Promesas de pago (1B+1O)", f"{kp['promesas']:,}")
-    _vic_kpi(k4, "Monto comprometido", f"$ {kp['monto']:,.2f}")
+    _vic_kpi(k3, "Promesas de pago (1B+1O)", f"{kp['promesas']:,}", color="#22c55e")
+    _vic_kpi(k4, "Monto comprometido", f"$ {kp['monto']:,.2f}", color="#a855f7")
     sal_color = "#e74c3c" if kp["saludo"]/kp["total"] > 0.40 else "#f39c12" if kp["saludo"]/kp["total"] > 0.25 else "#27ae60"
     _vic_kpi(k5, "Cuelga en saludo (1L)", _vic_pct(kp["saludo"], kp["total"]), color=sal_color)
 
+    # ── Gráficas: composición + por estado ──────────────────────────────────
+    _coq_section("📈", "Análisis Visual", "Composición de la jornada y top de disposiciones")
+    g1, g2 = st.columns([1, 2])
+
+    with g1:
+        no_contact = max(kp["total"] - kp["humanos"], 0)
+        fig_donut = go.Figure(data=[go.Pie(
+            labels=["Contacto humano", "No contactable / máquina"],
+            values=[kp["humanos"], no_contact],
+            hole=0.62,
+            marker=dict(colors=["#22c55e", "#ef4444"]),
+            textinfo="percent",
+            textfont=dict(color="#fff", size=14),
+        )])
+        fig_donut.update_layout(
+            title=dict(text="Contactabilidad", font=dict(color="#e2e8f0", size=15)),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            showlegend=True, legend=dict(font=dict(color="#cbd5e1"), orientation="h", y=-0.1),
+            margin=dict(t=40, b=10, l=10, r=10), height=320,
+            annotations=[dict(text=f"{_vic_pct(kp['humanos'], kp['total'])}", x=0.5, y=0.5,
+                               font=dict(size=22, color="#fff"), showarrow=False)],
+        )
+        st.plotly_chart(fig_donut, use_container_width=True)
+
+    with g2:
+        top_estado = contact["por_estado"].sort_values("Llamadas", ascending=False).head(15)
+        colors_bar = [_coq_status_color(s, _COQ_PROMESA, _COQ_SALUDO) for s in top_estado["Status"]]
+        fig_bar = go.Figure(go.Bar(
+            x=top_estado["Llamadas"], y=top_estado["Status"], orientation="h",
+            marker_color=colors_bar, text=top_estado["Llamadas"], textposition="outside",
+            customdata=top_estado["Descripción"],
+            hovertemplate="<b>%{y}</b> — %{customdata}<br>Llamadas: %{x}<extra></extra>",
+        ))
+        fig_bar.update_layout(
+            title=dict(text="Top disposiciones del día (status)", font=dict(color="#e2e8f0", size=15)),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#cbd5e1"), height=320,
+            yaxis=dict(autorange="reversed", gridcolor="#27314a"),
+            xaxis=dict(gridcolor="#27314a"),
+            margin=dict(t=40, b=10, l=10, r=10),
+        )
+        st.plotly_chart(fig_bar, use_container_width=True)
+        st.caption("🟢 Promesa de pago · 🔴 Problema operativo (saludo / agente no disponible / drop) · 🟠 Buzón · 🔵 Otro")
+
     # ── Alertas / tendencia ──────────────────────────────────────────────────
-    st.markdown("#### Alertas y Tendencia")
+    _coq_section("🚨", "Alertas y Tendencia", "Comparación contra el día anterior y focos rojos")
     saludo_rate = kp["saludo"] / kp["total"] if kp["total"] else 0
     if saludo_rate > 0.40:
         _vic_alert("Evasión / cuelga en saludo CRÍTICA",
@@ -1794,19 +1867,52 @@ def page_coquimbo():
         st.caption("Sube el Tablero_Contactabilidad_Coquimbo del día anterior para ver la tendencia.")
 
     # ── Detalle de los 3 reportes ────────────────────────────────────────────
-    st.markdown("#### Detalle de los Reportes")
-    tab1, tab2, tab3 = st.tabs(["Tablero de Contactabilidad", "Control de Recontacto", "Tipificación de Gestión"])
+    _coq_section("🗂️", "Detalle de los Reportes", "Tablero, recontacto y tipificación completos")
+    tab1, tab2, tab3 = st.tabs(["📊 Tablero de Contactabilidad", "🔁 Control de Recontacto", "🏷️ Tipificación de Gestión"])
 
     with tab1:
+        st.markdown("##### Resumen")
         st.dataframe(contact["resumen"], use_container_width=True, hide_index=True)
         st.markdown("##### Por Estado")
         st.dataframe(contact["por_estado"], use_container_width=True, hide_index=True)
         if len(contact["por_entidad"]) > 0:
             st.markdown("##### Por Entidad (evasión y cuelga por estado)")
+            ent_sorted = contact["por_entidad"].sort_values("%_evasion", ascending=False).head(15)
+            fig_ent = go.Figure()
+            fig_ent.add_bar(name="% Evasión", x=ent_sorted[ent_sorted.columns[0]], y=ent_sorted["%_evasion"],
+                             marker_color="#ef4444")
+            fig_ent.add_bar(name="% Cuelga en saludo", x=ent_sorted[ent_sorted.columns[0]], y=ent_sorted["%_cuelga"],
+                             marker_color="#f59e0b")
+            fig_ent.update_layout(
+                barmode="group", title=dict(text="Evasión y cuelga por entidad (lista/cartera)",
+                                             font=dict(color="#e2e8f0", size=15)),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#cbd5e1"), height=340,
+                legend=dict(font=dict(color="#cbd5e1")),
+                xaxis=dict(gridcolor="#27314a"), yaxis=dict(gridcolor="#27314a", title="%"),
+                margin=dict(t=40, b=10, l=10, r=10),
+            )
+            st.plotly_chart(fig_ent, use_container_width=True)
             st.dataframe(contact["por_entidad"], use_container_width=True, hide_index=True)
         if len(hist_contact) > 1:
             st.markdown("##### Histórico Acumulado")
             st.dataframe(hist_contact, use_container_width=True, hide_index=True)
+            if "% Contactabilidad" in hist_contact.columns:
+                hc = hist_contact.copy()
+                hc["_pct"] = pd.to_numeric(hc["% Contactabilidad"].astype(str).str.replace("%", ""), errors="coerce")
+                fig_trend = go.Figure(go.Scatter(
+                    x=hc["Fecha"], y=hc["_pct"], mode="lines+markers",
+                    line=dict(color="#3b82f6", width=3), marker=dict(size=8, color="#60a5fa"),
+                    fill="tozeroy", fillcolor="rgba(59,130,246,0.15)",
+                ))
+                fig_trend.update_layout(
+                    title=dict(text="Tendencia de contactabilidad", font=dict(color="#e2e8f0", size=15)),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#cbd5e1"), height=280,
+                    xaxis=dict(gridcolor="#27314a"), yaxis=dict(gridcolor="#27314a", title="%"),
+                    margin=dict(t=40, b=10, l=10, r=10),
+                )
+                st.plotly_chart(fig_trend, use_container_width=True)
 
     with tab2:
         if recont is None:
@@ -1820,8 +1926,25 @@ def page_coquimbo():
                 st.dataframe(hist_recont, use_container_width=True, hide_index=True)
 
     with tab3:
+        st.markdown("##### Resumen")
         st.dataframe(tipif["resumen"], use_container_width=True, hide_index=True)
         st.markdown("##### Por Tipo de Gestión (Status)")
+        ts = tipif["por_status"].sort_values("llamadas", ascending=False)
+        fig_tip = go.Figure(go.Bar(
+            x=ts["Status"], y=ts["llamadas"],
+            marker_color=[_coq_status_color(s, _COQ_PROMESA, _COQ_SALUDO) for s in ts["Status"]],
+            text=ts["llamadas"], textposition="outside",
+            customdata=ts["Descripción"],
+            hovertemplate="<b>%{x}</b> — %{customdata}<br>Llamadas: %{y}<extra></extra>",
+        ))
+        fig_tip.update_layout(
+            title=dict(text="Distribución de la gestión por status", font=dict(color="#e2e8f0", size=15)),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#cbd5e1"), height=340,
+            xaxis=dict(gridcolor="#27314a"), yaxis=dict(gridcolor="#27314a"),
+            margin=dict(t=40, b=10, l=10, r=10),
+        )
+        st.plotly_chart(fig_tip, use_container_width=True)
         st.dataframe(tipif["por_status"], use_container_width=True, hide_index=True)
         if len(tipif["por_estado_deudor"]) > 0:
             st.markdown("##### Por ID de Deudor (referencia)")
@@ -1832,7 +1955,7 @@ def page_coquimbo():
 
     # ── Exportar los 3 reportes ──────────────────────────────────────────────
     st.divider()
-    st.markdown("#### Descargar Reportes Actualizados")
+    _coq_section("⬇️", "Descargar Reportes Actualizados", "Listos para enviar o archivar en el histórico")
     fecha_str = fecha.strftime("%Y%m%d")
     e1, e2, e3 = st.columns(3)
 
