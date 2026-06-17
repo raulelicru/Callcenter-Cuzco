@@ -1120,6 +1120,19 @@ def _read_any_file(uploaded) -> pd.DataFrame:
 
 
 def _vic_load(uploaded) -> pd.DataFrame:
+    name = uploaded.name.lower()
+    if name.endswith((".xlsx", ".xls")):
+        xl = pd.ExcelFile(uploaded)
+        if len(xl.sheet_names) > 1:
+            best, best_cols = None, -1
+            for s in xl.sheet_names:
+                sdf = xl.parse(s, nrows=3)
+                if _vic_find(sdf, "status") and sdf.shape[1] > best_cols:
+                    best, best_cols = s, sdf.shape[1]
+            if best is None:
+                best = max(xl.sheet_names, key=lambda s: xl.parse(s, nrows=1).shape[1])
+            return xl.parse(best)
+        return xl.parse(xl.sheet_names[0])
     return _read_any_file(uploaded)
 
 
