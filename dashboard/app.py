@@ -1390,7 +1390,7 @@ def _vic_control_recontacto(df: pd.DataFrame, c: dict, fecha, promesa=None, labe
             "kpis": {"total_leads": len(res), "promesas": con_promesa, "pendientes": pendientes}}
 
 
-def _vic_tipificacion_gestion(df: pd.DataFrame, c: dict, fecha, labels=None, humanos_st=None) -> dict:
+def _vic_tipificacion_gestion(df: pd.DataFrame, c: dict, fecha, labels=None) -> dict:
     labels = labels if labels is not None else _VIC_GRAL_LABELS
     total = len(df)
     g = df.groupby("_st").size().rename("llamadas").reset_index().rename(columns={"_st": "Status"})
@@ -1405,24 +1405,12 @@ def _vic_tipificacion_gestion(df: pd.DataFrame, c: dict, fecha, labels=None, hum
         por_estado_deudor = df.groupby(c["estado_deudor"]).size().rename("count") \
             .reset_index().sort_values("count", ascending=False)
 
-    humanos_st = humanos_st or set()
-    es_humano = df["_st"].isin(humanos_st)
-    total_humano = int(es_humano.sum())
-
-    por_status_humano = pd.DataFrame()
-    if total_humano:
-        ph = df[es_humano].groupby("_st").size().rename("Llamadas").reset_index().rename(columns={"_st": "Status"})
-        ph["%"] = (ph["Llamadas"] / total_humano * 100).round(2)
-        ph["Descripción"] = ph["Status"].map(labels).fillna(ph["Status"].map(_VIC_STATUS_LABELS)).fillna("—")
-        por_status_humano = ph.sort_values("Llamadas", ascending=False)
-
     resumen = pd.DataFrame({
-        "Métrica": ["Fecha", "Total registros", "Tipos de gestión distintos", "Total gestionado por humano"],
-        "Valor": [str(fecha), total, df["_st"].nunique(), total_humano],
+        "Métrica": ["Fecha", "Total registros", "Tipos de gestión distintos"],
+        "Valor": [str(fecha), total, df["_st"].nunique()],
     })
     return {"resumen": resumen, "por_status": g, "por_estado_deudor": por_estado_deudor,
-            "por_status_humano": por_status_humano,
-            "kpis": {"total": total, "total_humano": total_humano}}
+            "kpis": {"total": total}}
 
 
 def _vic_append_historico(prev_upload, resumen_df: pd.DataFrame) -> pd.DataFrame:
@@ -1616,7 +1604,7 @@ def page_vicidial():
 
         contact = _vic_tablero_contactabilidad(df, c, fecha)
         recont  = _vic_control_recontacto(df, c, fecha)
-        tipif   = _vic_tipificacion_gestion(df, c, fecha, humanos_st=_VIC_GRAL_HUMANOS)
+        tipif   = _vic_tipificacion_gestion(df, c, fecha)
 
         hist_contact = _vic_append_historico(f_contact_prev, contact["resumen"])
         hist_tipif   = _vic_append_historico(f_tipif_prev, tipif["resumen"])
@@ -1883,7 +1871,7 @@ def page_coquimbo():
         contact = _vic_tablero_contactabilidad(df, c, fecha, promesa=_COQ_PROMESA,
                                                 saludo_st=_COQ_SALUDO, humanos_st=_COQ_HUMANOS, labels=labels_full)
         recont  = _vic_control_recontacto(df, c, fecha, promesa=_COQ_PROMESA, labels=labels_full)
-        tipif   = _vic_tipificacion_gestion(df, c, fecha, labels=labels_full, humanos_st=_COQ_HUMANOS)
+        tipif   = _vic_tipificacion_gestion(df, c, fecha, labels=labels_full)
 
         hist_contact = _vic_append_historico(f_contact_prev, contact["resumen"])
         hist_tipif   = _vic_append_historico(f_tipif_prev, tipif["resumen"])
@@ -2050,16 +2038,13 @@ def page_coquimbo():
         st.markdown("##### Resumen")
         _vic_resumen_cards(tipif["resumen"])
         st.markdown("##### Por Tipo de Gestión (Status)")
-        ts = tipif["por_status"].sort_values("llamadas", ascending=False).copy()
-        ts["_label"] = ts.apply(
-            lambda r: (r["Descripción"][:20] if r["Descripción"] and r["Descripción"] != "—" else r["Status"]),
-            axis=1)
+        ts = tipif["por_status"].sort_values("llamadas", ascending=False)
         fig_tip = go.Figure(go.Bar(
-            x=ts["_label"], y=ts["llamadas"],
+            x=ts["Status"], y=ts["llamadas"],
             marker_color=[_coq_status_color(s, _COQ_PROMESA, _COQ_SALUDO) for s in ts["Status"]],
             text=ts["llamadas"], textposition="outside",
-            customdata=ts["Status"],
-            hovertemplate="<b>%{customdata}</b> — %{x}<br>Llamadas: %{y}<extra></extra>",
+            customdata=ts["Descripción"],
+            hovertemplate="<b>%{x}</b> — %{customdata}<br>Llamadas: %{y}<extra></extra>",
         ))
         fig_tip.update_layout(
             title=dict(text="Distribución de la gestión por status", font=dict(color="#e2e8f0", size=15)),
@@ -2069,19 +2054,10 @@ def page_coquimbo():
             margin=dict(t=40, b=10, l=10, r=10),
         )
         st.plotly_chart(fig_tip, use_container_width=True)
-        with st.expander("Ver tabla completa por status"):
-            st.dataframe(tipif["por_status"], use_container_width=True, hide_index=True)
-
-        if len(tipif["por_status_humano"]) > 0:
-            st.markdown("##### Análisis: ¿qué pasó con las gestiones por humano?")
-            th = tipif["kpis"]["total_humano"]
-            st.caption(f"Se gestionaron **{th:,}** llamadas por humano. Desglose de los status en que terminaron:")
-            _vic_estado_cards(tipif["por_status_humano"], _COQ_PROMESA, _COQ_SALUDO)
-
+        st.dataframe(tipif["por_status"], use_container_width=True, hide_index=True)
         if len(tipif["por_estado_deudor"]) > 0:
             st.markdown("##### Por ID de Deudor (referencia)")
-            with st.expander("Ver tabla completa por ID de deudor"):
-                st.dataframe(tipif["por_estado_deudor"], use_container_width=True, hide_index=True)
+            st.dataframe(tipif["por_estado_deudor"], use_container_width=True, hide_index=True)
         if len(hist_tipif) > 1:
             st.markdown("##### Histórico Acumulado")
             st.dataframe(hist_tipif, use_container_width=True, hide_index=True)
