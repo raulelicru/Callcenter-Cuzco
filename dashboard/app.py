@@ -1688,9 +1688,9 @@ def page_vicidial():
 
     with tab1:
         _vic_resumen_cards(contact["resumen"])
-        st.markdown("##### Por Estado")
+        st.markdown("##### Por Estatus")
         _vic_estado_cards(contact["por_estado"], _VIC_GRAL_PROMESA, _VIC_GRAL_SALUDO)
-        with st.expander("Ver tabla completa por estado"):
+        with st.expander("Ver tabla completa por estatus"):
             st.dataframe(contact["por_estado"], use_container_width=True, hide_index=True)
         if len(contact["por_entidad"]) > 0:
             st.markdown("##### Por Entidad (evasión y cuelga por estado)")
@@ -1988,9 +1988,9 @@ def page_coquimbo():
     with tab1:
         st.markdown("##### Resumen")
         _vic_resumen_cards(contact["resumen"])
-        st.markdown("##### Por Estado")
+        st.markdown("##### Por Estatus")
         _vic_estado_cards(contact["por_estado"], _COQ_PROMESA, _COQ_SALUDO)
-        with st.expander("Ver tabla completa por estado"):
+        with st.expander("Ver tabla completa por estatus"):
             st.dataframe(contact["por_estado"], use_container_width=True, hide_index=True)
         if len(contact["por_entidad"]) > 0:
             st.markdown("##### Por Entidad (evasión y cuelga por estado)")
