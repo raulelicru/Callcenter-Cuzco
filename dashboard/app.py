@@ -1280,13 +1280,14 @@ def _vic_extract_date_from_name(name: str):
     return None
 
 
-def _vic_export_cols(df: pd.DataFrame, monto_subs=("postal_code",), estado_subs=("first_name",)) -> dict:
+def _vic_export_cols(df: pd.DataFrame, monto_subs=("postal_code",), estado_subs=("first_name",),
+                      entidad_subs=("list_id", "campaign_id", "entidad")) -> dict:
     return {
         "status":       _vic_find(df, "status"),
         "phone":        _vic_find(df, "phone_number", "phone", "telefono"),
         "date":         _vic_find(df, "call_date", "date", "fecha"),
         "agent":        _vic_find(df, "user", "agent", "agente"),
-        "entidad":      _vic_find(df, "list_id", "campaign_id", "entidad"),
+        "entidad":      _vic_find(df, *entidad_subs),
         "monto":        _vic_find(df, *monto_subs),
         "estado_deudor":_vic_find(df, *estado_subs),
         "lead_id":      _vic_find(df, "lead_id"),
@@ -1834,7 +1835,8 @@ def page_coquimbo():
             st.error(f"No se pudo leer el export: {e}")
             return
 
-        c = _vic_export_cols(df, monto_subs=("last_name",), estado_subs=("first_name",))
+        c = _vic_export_cols(df, monto_subs=("last_name",), estado_subs=("first_name",),
+                              entidad_subs=("city",))
         if not c["status"]:
             st.error("No se encontró la columna **status** en el export. "
                      "Verifica que el archivo incluya esa columna.")
@@ -1996,10 +1998,10 @@ def page_coquimbo():
         with st.expander("Ver tabla completa por estatus"):
             st.dataframe(contact["por_estado"], use_container_width=True, hide_index=True)
         if len(contact["por_entidad"]) > 0:
-            st.markdown("##### Por Entidad (evasión y cuelga por estado)")
+            st.markdown("##### Por Estado (evasión y cuelga por estado geográfico)")
             ent_col = contact["por_entidad"].columns[0]
             _vic_entidad_cards(contact["por_entidad"], ent_col)
-            with st.expander("Ver tabla completa por entidad"):
+            with st.expander("Ver tabla completa por estado"):
                 st.dataframe(contact["por_entidad"], use_container_width=True, hide_index=True)
         if len(hist_contact) > 1:
             st.markdown("##### Histórico Acumulado")
