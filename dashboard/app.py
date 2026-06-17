@@ -1426,26 +1426,36 @@ def _vic_trend_line(hist: pd.DataFrame, metric: str, label: str, fmt="{:.1f}") -
     return f"{label}: {fmt.format(curr)} ({arrow} {fmt.format(abs(delta))} vs. día anterior)"
 
 
-def _vic_style_resumen(df: pd.DataFrame):
-    """Colorea cada fila de la tabla Resumen según el tipo de métrica, para que sea
-    más fácil de leer de un vistazo (verde=positivo, rojo=problema, morado=dinero, azul=info)."""
-    def row_style(row):
-        m = str(row.get("Métrica", "")).lower()
-        if "promesa" in m:
-            bg = "#14532d"
-        elif "monto" in m:
-            bg = "#581c87"
-        elif "cuelga" in m or "saludo" in m:
-            bg = "#7f1d1d"
-        elif "contactabilidad" in m or "gestión efectiva" in m or "humanos" in m:
-            bg = "#1e3a5f"
-        elif "fecha" in m or "total llamadas" in m:
-            bg = "#1e2535"
-        else:
-            bg = "transparent"
-        return [f"background-color:{bg};color:#fff;font-weight:600" if bg != "transparent"
-                else "" for _ in row]
-    return df.style.apply(row_style, axis=1)
+def _vic_resumen_color(metrica: str) -> str:
+    m = str(metrica).lower()
+    if "promesa" in m:
+        return "#22c55e"
+    if "monto" in m:
+        return "#a855f7"
+    if "cuelga" in m or "saludo" in m:
+        return "#ef4444"
+    if "contactabilidad" in m or "gestión efectiva" in m or "humanos" in m or "pendientes" in m:
+        return "#3b82f6"
+    return "#64748b"
+
+
+def _vic_resumen_cards(df: pd.DataFrame, cols_per_row: int = 5):
+    """Renderiza la tabla Resumen como tarjetas con borde de color (mismo estilo que los KPIs),
+    en vez de una tabla plana, para que sea más fácil de leer de un vistazo."""
+    rows = df.to_dict("records")
+    for i in range(0, len(rows), cols_per_row):
+        chunk = rows[i:i + cols_per_row]
+        cols = st.columns(len(chunk))
+        for col, r in zip(cols, chunk):
+            color = _vic_resumen_color(r.get("Métrica", ""))
+            with col:
+                st.markdown(f"""
+                <div style="background:#1a2333;border-radius:10px;padding:14px 16px;
+                            border-left:4px solid {color};margin-bottom:10px;min-height:84px">
+                  <div style="color:#8899aa;font-size:11px;text-transform:uppercase;
+                              letter-spacing:.03em">{r.get('Métrica', '')}</div>
+                  <div style="color:#fff;font-size:21px;font-weight:700;margin-top:4px">{r.get('Valor', '')}</div>
+                </div>""", unsafe_allow_html=True)
 
 
 def page_vicidial():
@@ -1597,7 +1607,7 @@ def page_vicidial():
     tab1, tab2, tab3 = st.tabs(["Tablero de Contactabilidad", "Control de Recontacto", "Tipificación de Gestión"])
 
     with tab1:
-        st.dataframe(_vic_style_resumen(contact["resumen"]), use_container_width=True, hide_index=True)
+        _vic_resumen_cards(contact["resumen"])
         st.markdown("##### Por Estado")
         st.dataframe(contact["por_estado"], use_container_width=True, hide_index=True)
         if len(contact["por_entidad"]) > 0:
@@ -1611,7 +1621,7 @@ def page_vicidial():
         if recont is None:
             st.info("No se detectó columna de teléfono / lead_id en el export para generar este reporte.")
         else:
-            st.dataframe(_vic_style_resumen(recont["resumen"]), use_container_width=True, hide_index=True)
+            _vic_resumen_cards(recont["resumen"])
             st.markdown("##### Detalle por Lead")
             st.dataframe(recont["detalle"], use_container_width=True, hide_index=True)
             if hist_recont is not None and len(hist_recont) > 1:
@@ -1619,7 +1629,7 @@ def page_vicidial():
                 st.dataframe(hist_recont, use_container_width=True, hide_index=True)
 
     with tab3:
-        st.dataframe(_vic_style_resumen(tipif["resumen"]), use_container_width=True, hide_index=True)
+        _vic_resumen_cards(tipif["resumen"])
         st.markdown("##### Por Tipo de Gestión (Status)")
         st.dataframe(tipif["por_status"], use_container_width=True, hide_index=True)
         if len(tipif["por_estado_deudor"]) > 0:
@@ -1895,7 +1905,7 @@ def page_coquimbo():
 
     with tab1:
         st.markdown("##### Resumen")
-        st.dataframe(_vic_style_resumen(contact["resumen"]), use_container_width=True, hide_index=True)
+        _vic_resumen_cards(contact["resumen"])
         st.markdown("##### Por Estado")
         st.dataframe(contact["por_estado"], use_container_width=True, hide_index=True)
         if len(contact["por_entidad"]) > 0:
@@ -1941,7 +1951,7 @@ def page_coquimbo():
         if recont is None:
             st.info("No se detectó columna de teléfono / lead_id en el export para generar este reporte.")
         else:
-            st.dataframe(_vic_style_resumen(recont["resumen"]), use_container_width=True, hide_index=True)
+            _vic_resumen_cards(recont["resumen"])
             st.markdown("##### Detalle por Lead")
             st.dataframe(recont["detalle"], use_container_width=True, hide_index=True)
             if hist_recont is not None and len(hist_recont) > 1:
@@ -1950,7 +1960,7 @@ def page_coquimbo():
 
     with tab3:
         st.markdown("##### Resumen")
-        st.dataframe(_vic_style_resumen(tipif["resumen"]), use_container_width=True, hide_index=True)
+        _vic_resumen_cards(tipif["resumen"])
         st.markdown("##### Por Tipo de Gestión (Status)")
         ts = tipif["por_status"].sort_values("llamadas", ascending=False)
         fig_tip = go.Figure(go.Bar(
