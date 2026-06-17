@@ -44,12 +44,41 @@ _VIC_GRAL_LABELS    = {
 # Reglas de la campaña Coquimbo (mismos 3 archivos, otra tipificación interna)
 _COQ_PROMESA = {"1B", "1O"}
 _COQ_SALUDO  = "1L"
-_COQ_HUMANOS = {"2", "4", "6", "1B", "1C", "1D", "1E", "1F", "1G", "1H", "1I", "1J", "1K",
+_COQ_HUMANOS = {"02", "04", "06", "1B", "1C", "1D", "1E", "1F", "1G", "1H", "1I", "1J", "1K",
                 "1L", "1N", "1O", "2B", "2C", "2D", "2E", "2F", "3C", "3D", "3E"}
 _COQ_LABELS  = {
-    "1L": "Cuelga en saludo (rechazo temprano)",
-    "1B": "Promesa de pago",
-    "1O": "Promesa de pago (alterna)",
+    "02":     "Acuerdo autorizado",
+    "04":     "Entrante no relacionada",
+    "06":     "Trasferencia de llamada",
+    "1B":     "Promesa de pago",
+    "1C":     "Informa ya pagó",
+    "1D":     "Consultor no puede pagar",
+    "1E":     "No se inscribió / falsificación",
+    "1F":     "No pasó pedido",
+    "1G":     "Presta código a empresaria",
+    "1H":     "Entregó dinero a empresaria",
+    "1I":     "Ajuste no procesado",
+    "1J":     "Familiar usa código de consultor",
+    "1K":     "Canceló por error a otro código",
+    "1L":     "Cuelga en saludo (rechazo temprano)",
+    "1N":     "Posterga pago",
+    "1O":     "Promesa de pago (alterna)",
+    "2B":     "Recado familiar",
+    "2C":     "Recado trabajo",
+    "2D":     "Recado amigo",
+    "2E":     "Recado vecino",
+    "2F":     "Mensaje a terceros",
+    "3B":     "Línea incorrecta, no enlaza",
+    "3C":     "No contesta",
+    "3D":     "Número no corresponde",
+    "3E":     "Ya no vive / trabaja ahí",
+    "3H":     "Buzón celular",
+    "AA":     "Buzón de voz o contestadora automática",
+    "AB":     "Agente no disponible",
+    "DROP":   "Llamada descartada o colgada por el sistema antes de conectarse con un agente",
+    "INCALL": "Llamada exitosa",
+    "NA":     "No contesta",
+    "PDROP":  "Llamada colgada antes de atención",
 }
 
 from database import (
