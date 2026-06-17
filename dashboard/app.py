@@ -1439,6 +1439,29 @@ def _vic_resumen_color(metrica: str) -> str:
     return "#64748b"
 
 
+def _vic_estado_cards(df: pd.DataFrame, promesa, saludo_st, cols_per_row: int = 4, top: int = 16):
+    """Muestra cada status como tarjeta (código, descripción, llamadas, %), coloreada
+    según si es promesa de pago (verde), problema operativo (rojo/naranja) u otro (azul)."""
+    rows = df.sort_values("Llamadas", ascending=False).head(top).to_dict("records")
+    for i in range(0, len(rows), cols_per_row):
+        chunk = rows[i:i + cols_per_row]
+        cols = st.columns(len(chunk))
+        for col, r in zip(cols, chunk):
+            color = _coq_status_color(r.get("Status", ""), promesa, saludo_st)
+            desc = r.get("Descripción", "—")
+            with col:
+                st.markdown(f"""
+                <div style="background:#1a2333;border-radius:10px;padding:14px 16px;
+                            border-left:4px solid {color};margin-bottom:10px;min-height:118px">
+                  <div style="display:flex;justify-content:space-between;align-items:baseline">
+                    <div style="color:#fff;font-size:17px;font-weight:800">{r.get('Status', '')}</div>
+                    <div style="color:{color};font-size:15px;font-weight:700">{r.get('%', 0)}%</div>
+                  </div>
+                  <div style="color:#9fb0cc;font-size:12.5px;margin-top:4px;line-height:1.3">{desc}</div>
+                  <div style="color:#6b7a99;font-size:12px;margin-top:8px">{int(r.get('Llamadas', 0)):,} llamadas</div>
+                </div>""", unsafe_allow_html=True)
+
+
 def _vic_entidad_cards(df: pd.DataFrame, ent_col: str, cols_per_row: int = 4, top: int = 12):
     """Muestra cada entidad (lista/cartera) como una tarjeta con su % de evasión y % de cuelga,
     en vez de un gráfico de barras (más fácil de leer con códigos numéricos largos)."""
@@ -1637,7 +1660,9 @@ def page_vicidial():
     with tab1:
         _vic_resumen_cards(contact["resumen"])
         st.markdown("##### Por Estado")
-        st.dataframe(contact["por_estado"], use_container_width=True, hide_index=True)
+        _vic_estado_cards(contact["por_estado"], _VIC_GRAL_PROMESA, _VIC_GRAL_SALUDO)
+        with st.expander("Ver tabla completa por estado"):
+            st.dataframe(contact["por_estado"], use_container_width=True, hide_index=True)
         if len(contact["por_entidad"]) > 0:
             st.markdown("##### Por Entidad (evasión y cuelga por estado)")
             st.dataframe(contact["por_entidad"], use_container_width=True, hide_index=True)
@@ -1935,7 +1960,9 @@ def page_coquimbo():
         st.markdown("##### Resumen")
         _vic_resumen_cards(contact["resumen"])
         st.markdown("##### Por Estado")
-        st.dataframe(contact["por_estado"], use_container_width=True, hide_index=True)
+        _vic_estado_cards(contact["por_estado"], _COQ_PROMESA, _COQ_SALUDO)
+        with st.expander("Ver tabla completa por estado"):
+            st.dataframe(contact["por_estado"], use_container_width=True, hide_index=True)
         if len(contact["por_entidad"]) > 0:
             st.markdown("##### Por Entidad (evasión y cuelga por estado)")
             ent_col = contact["por_entidad"].columns[0]
