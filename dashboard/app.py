@@ -1120,6 +1120,12 @@ def _read_any_file(uploaded) -> pd.DataFrame:
 
 
 def _vic_load(uploaded) -> pd.DataFrame:
+    return _vic_load_with_legend(uploaded)[0]
+
+
+def _vic_load_with_legend(uploaded) -> tuple:
+    """Lee el archivo de llamadas y, si el Excel trae una hoja extra con
+    leyenda de códigos (columnas tipo Código/Descripción), la devuelve como dict."""
     name = uploaded.name.lower()
     if name.endswith((".xlsx", ".xls")):
         xl = pd.ExcelFile(uploaded)
@@ -1131,9 +1137,22 @@ def _vic_load(uploaded) -> pd.DataFrame:
                     best, best_cols = s, sdf.shape[1]
             if best is None:
                 best = max(xl.sheet_names, key=lambda s: xl.parse(s, nrows=1).shape[1])
-            return xl.parse(best)
-        return xl.parse(xl.sheet_names[0])
-    return _read_any_file(uploaded)
+            legend = {}
+            for s in xl.sheet_names:
+                if s == best:
+                    continue
+                ldf = xl.parse(s)
+                col_cod  = _vic_find(ldf, "codigo", "código", "status", "code")
+                col_desc = _vic_find(ldf, "descripcion", "descripción", "desc")
+                if col_cod and col_desc:
+                    for _, row in ldf.iterrows():
+                        cod = str(row[col_cod]).strip().upper()
+                        desc = str(row[col_desc]).strip()
+                        if cod and cod != "NAN" and desc and desc.upper() != "NAN":
+                            legend[cod] = desc
+            return xl.parse(best), legend
+        return xl.parse(xl.sheet_names[0]), {}
+    return _read_any_file(uploaded), {}
 
 
 def _vic_fmt(seconds) -> str:
@@ -1667,7 +1686,7 @@ def page_coquimbo():
 
     with st.spinner("Procesando..."):
         try:
-            df = _vic_load(f_export)
+            df, legend = _vic_load_with_legend(f_export)
         except Exception as e:
             st.error(f"No se pudo leer el export: {e}")
             return
@@ -1679,6 +1698,25 @@ def page_coquimbo():
             return
         df["_st"] = _vic_status_norm(df[c["status"]])
 
+        if f_vdad is not None:
+            try:
+                _, legend_vdad = _vic_load_with_legend(f_vdad)
+                if not legend_vdad:
+                    vdf = _vic_load(f_vdad)
+                    col_cod  = _vic_find(vdf, "codigo", "código", "status", "code")
+                    col_desc = _vic_find(vdf, "descripcion", "descripción", "desc")
+                    if col_cod and col_desc:
+                        legend_vdad = {
+                            str(r[col_cod]).strip().upper(): str(r[col_desc]).strip()
+                            for _, r in vdf.iterrows()
+                            if str(r[col_cod]).strip() and str(r[col_cod]).strip().upper() != "NAN"
+                        }
+                legend = {**legend_vdad, **legend}
+            except Exception:
+                pass
+
+        labels_full = {**legend, **_COQ_LABELS}
+
         fecha = _vic_extract_date_from_name(f_export.name) or date.today()
         df, es_sabado = _vic_filter_jornada(df, c, fecha)
         if es_sabado:
@@ -1686,9 +1724,9 @@ def page_coquimbo():
                     "Compara este reporte contra el sábado anterior en la hoja *Histórico*.")
 
         contact = _vic_tablero_contactabilidad(df, c, fecha, promesa=_COQ_PROMESA,
-                                                saludo_st=_COQ_SALUDO, humanos_st=_COQ_HUMANOS, labels=_COQ_LABELS)
-        recont  = _vic_control_recontacto(df, c, fecha, promesa=_COQ_PROMESA, labels=_COQ_LABELS)
-        tipif   = _vic_tipificacion_gestion(df, c, fecha, labels=_COQ_LABELS)
+                                                saludo_st=_COQ_SALUDO, humanos_st=_COQ_HUMANOS, labels=labels_full)
+        recont  = _vic_control_recontacto(df, c, fecha, promesa=_COQ_PROMESA, labels=labels_full)
+        tipif   = _vic_tipificacion_gestion(df, c, fecha, labels=labels_full)
 
         hist_contact = _vic_append_historico(f_contact_prev, contact["resumen"])
         hist_tipif   = _vic_append_historico(f_tipif_prev, tipif["resumen"])
