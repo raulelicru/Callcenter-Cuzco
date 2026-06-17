@@ -1913,16 +1913,19 @@ def page_coquimbo():
         st.plotly_chart(fig_donut, use_container_width=True)
 
     with g2:
-        top_estado = contact["por_estado"].sort_values("Llamadas", ascending=False).head(15)
+        top_estado = contact["por_estado"].sort_values("Llamadas", ascending=False).head(15).copy()
+        top_estado["_label"] = top_estado.apply(
+            lambda r: (r["Descripción"][:28] if r["Descripción"] and r["Descripción"] != "—" else r["Status"]),
+            axis=1)
         colors_bar = [_coq_status_color(s, _COQ_PROMESA, _COQ_SALUDO) for s in top_estado["Status"]]
         fig_bar = go.Figure(go.Bar(
-            x=top_estado["Llamadas"], y=top_estado["Status"], orientation="h",
+            x=top_estado["Llamadas"], y=top_estado["_label"], orientation="h",
             marker_color=colors_bar, text=top_estado["Llamadas"], textposition="outside",
-            customdata=top_estado["Descripción"],
-            hovertemplate="<b>%{y}</b> — %{customdata}<br>Llamadas: %{x}<extra></extra>",
+            customdata=top_estado["Status"],
+            hovertemplate="<b>%{customdata}</b> — %{y}<br>Llamadas: %{x}<extra></extra>",
         ))
         fig_bar.update_layout(
-            title=dict(text="Top disposiciones del día (status)", font=dict(color="#e2e8f0", size=15)),
+            title=dict(text="Top disposiciones del día", font=dict(color="#e2e8f0", size=15)),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#cbd5e1"), height=320,
             yaxis=dict(autorange="reversed", gridcolor="#27314a"),
