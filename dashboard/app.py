@@ -1910,20 +1910,27 @@ def page_coquimbo():
         st.dataframe(contact["por_estado"], use_container_width=True, hide_index=True)
         if len(contact["por_entidad"]) > 0:
             st.markdown("##### Por Entidad (evasión y cuelga por estado)")
-            ent_sorted = contact["por_entidad"].sort_values("%_evasion", ascending=False).head(15)
+            ent_col = contact["por_entidad"].columns[0]
+            ent_sorted = contact["por_entidad"].sort_values("total", ascending=False).head(12).copy()
+            ent_sorted[ent_col] = ent_sorted[ent_col].astype(str)
+            ent_sorted = ent_sorted.sort_values("%_evasion", ascending=True)
             fig_ent = go.Figure()
-            fig_ent.add_bar(name="% Evasión", x=ent_sorted[ent_sorted.columns[0]], y=ent_sorted["%_evasion"],
-                             marker_color="#ef4444")
-            fig_ent.add_bar(name="% Cuelga en saludo", x=ent_sorted[ent_sorted.columns[0]], y=ent_sorted["%_cuelga"],
-                             marker_color="#f59e0b")
+            fig_ent.add_bar(name="% Evasión", y=ent_sorted[ent_col], x=ent_sorted["%_evasion"],
+                             orientation="h", marker_color="#ef4444",
+                             text=ent_sorted["%_evasion"].map(lambda v: f"{v:.1f}%"), textposition="outside")
+            fig_ent.add_bar(name="% Cuelga en saludo", y=ent_sorted[ent_col], x=ent_sorted["%_cuelga"],
+                             orientation="h", marker_color="#f59e0b",
+                             text=ent_sorted["%_cuelga"].map(lambda v: f"{v:.1f}%"), textposition="outside")
             fig_ent.update_layout(
-                barmode="group", title=dict(text="Evasión y cuelga por entidad (lista/cartera)",
-                                             font=dict(color="#e2e8f0", size=15)),
+                barmode="group",
+                title=dict(text="Evasión y cuelga por entidad (top 12 listas/carteras con más llamadas)",
+                           font=dict(color="#e2e8f0", size=15)),
                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#cbd5e1"), height=340,
-                legend=dict(font=dict(color="#cbd5e1")),
-                xaxis=dict(gridcolor="#27314a"), yaxis=dict(gridcolor="#27314a", title="%"),
-                margin=dict(t=40, b=10, l=10, r=10),
+                font=dict(color="#cbd5e1"), height=420,
+                legend=dict(font=dict(color="#cbd5e1"), orientation="h", y=-0.12),
+                yaxis=dict(type="category", gridcolor="#27314a", title="Entidad (lista/cartera)"),
+                xaxis=dict(gridcolor="#27314a", title="%"),
+                margin=dict(t=50, b=10, l=10, r=30),
             )
             st.plotly_chart(fig_ent, use_container_width=True)
             st.dataframe(contact["por_entidad"], use_container_width=True, hide_index=True)
